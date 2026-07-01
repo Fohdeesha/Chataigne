@@ -22,6 +22,8 @@ AutomationMappingLayer::AutomationMappingLayer(const String& name, Sequence* s, 
 	recorder.editorIsCollapsed = true;
 	addChildControllableContainer(&recorder, false, 0);
 
+	addKeyFromInputTrigger = addTrigger("Add Key From Input", "Grab the current value of the recorder's input and write it as a key at the current playhead position. Can be triggered from OSC.");
+
 	uiHeight->setValue(120);
 }
 
@@ -38,6 +40,30 @@ void AutomationMappingLayer::setupAutomation(Automation* a)
 	automation->length->setControllableFeedbackOnly(true); //force not saving and not changing from user
 	automation->length->isSavable = false;
 	if (ChataigneSequenceManager::getInstance()->snapKeysToFrames->boolValue()) automation->setUnitSteps(sequence->fps->intValue());
+}
+
+var AutomationMappingLayer::getRecorderInputValue(bool* success)
+{
+	if (success != nullptr) *success = false;
+
+	Parameter* inputP = dynamic_cast<Parameter*>(recorder.input->target.get());
+	if (inputP == nullptr)
+	{
+		NLOG(niceName, "Can't add key from input : no recorder input is set.");
+		return var();
+	}
+
+	var val = (recorder.normalize->enabled && recorder.normalize->boolValue()) ? inputP->getNormalizedValue() : inputP->getValue();
+
+	if (success != nullptr) *success = true;
+	return val;
+}
+
+void AutomationMappingLayer::onContainerTriggerTriggered(Trigger* t)
+{
+	MappingLayer::onContainerTriggerTriggered(t);
+
+	if (t == addKeyFromInputTrigger) addKeyAtCurrentTimeFromInput();
 }
 
 void AutomationMappingLayer::updateMappingInputValueInternal()

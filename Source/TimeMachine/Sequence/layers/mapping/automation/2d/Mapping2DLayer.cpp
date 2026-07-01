@@ -84,6 +84,36 @@ void Mapping2DLayer::stopRecorderAndAddKeys()
 	automation->addFromPointsAndSimplifyBezier(positions);
 }
 
+void Mapping2DLayer::addKeyAtCurrentTimeFromInput()
+{
+	bool ok = false;
+	var v = getRecorderInputValue(&ok);
+	if (!ok) return;
+
+	if (!v.isArray() || v.size() < 2)
+	{
+		NLOG(niceName, "Can't add key from input : recorder input is not a 2D value.");
+		return;
+	}
+
+	Point<float> p((float)v[0], (float)v[1]);
+	float t = sequence->currentTime->floatValue();
+
+	//Append the captured point to the spatial curve. updateCurve() (called on add) recomputes curvePosition and length.
+	//Note : a capture adds two objects (a spatial curve point + a timing key), so it takes two undo steps to fully revert.
+	Curve2DKey* k = new Curve2DKey();
+	k->setPosition(p);
+	curve.addItem(k, var(), true);
+
+	//Pin a timing key at the playhead pointing to the new point's normalized progression along the curve.
+	float norm = curve.length->floatValue() > 0 ? k->curvePosition / curve.length->floatValue() : 0;
+
+	float eps = 0.5f / jmax(1.0f, sequence->fps->floatValue());
+	AutomationKey* ak = automation->getKeyForPosition(t, true);
+	if (ak != nullptr && fabsf(ak->position->floatValue() - t) < eps) ak->value->setValue(norm);
+	else automation->addKey(t, norm, true);
+}
+
 SequenceLayerPanel* Mapping2DLayer::getPanel()
 {
 	return new Mapping2DLayerPanel(this);

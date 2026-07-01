@@ -20,14 +20,19 @@ AutomationMappingLayerPanel::AutomationMappingLayerPanel(AutomationMappingLayer*
         ImageCache::getFromMemory(BinaryData::keyframe_off_png, BinaryData::keyframe_off_pngSize)
     ));
 
+    captureKeyBT.reset(AssetManager::getInstance()->getToggleBTImage(ImageCache::getFromMemory(BinaryData::add_png, BinaryData::add_pngSize)));
+    captureKeyBT->setTooltip("Add a key at the playhead using the current value of the recorder's input");
+
     prevKeyBT.reset(AssetManager::getInstance()->getToggleBTImage(ImageCache::getFromMemory(BinaryData::prevkey_png, BinaryData::prevkey_pngSize)));
     nextKeyBT.reset(AssetManager::getInstance()->getToggleBTImage(ImageCache::getFromMemory(BinaryData::nextkey_png, BinaryData::nextkey_pngSize)));
 
     keyBT->addListener(this);
+    captureKeyBT->addListener(this);
     prevKeyBT->addListener(this);
     nextKeyBT->addListener(this);
 
     addAndMakeVisible(keyBT.get());
+    addAndMakeVisible(captureKeyBT.get());
     addAndMakeVisible(prevKeyBT.get());
     addAndMakeVisible(nextKeyBT.get());
 
@@ -47,6 +52,7 @@ void AutomationMappingLayerPanel::resizedInternalPanelContent(Rectangle<int>& r)
     nextKeyBT->setBounds(ar.removeFromRight(20).reduced(2));
     keyBT->setBounds(ar.removeFromRight(20).reduced(2));
     prevKeyBT->setBounds(ar.removeFromRight(20).reduced(2));
+    captureKeyBT->setBounds(ar.removeFromRight(24).reduced(2));
 }
 
 void AutomationMappingLayerPanel::buttonClicked(Button* b)
@@ -56,6 +62,10 @@ void AutomationMappingLayerPanel::buttonClicked(Button* b)
     if (b == keyBT.get())
     {
         aml->automation->insertKeyAt(aml->sequence->currentTime->floatValue());
+    }
+    else if (b == captureKeyBT.get())
+    {
+        aml->addKeyFromInputTrigger->trigger();
     }
     else if (b == prevKeyBT.get())
     {

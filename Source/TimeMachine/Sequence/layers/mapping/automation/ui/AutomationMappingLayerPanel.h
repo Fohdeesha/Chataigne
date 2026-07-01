@@ -19,6 +19,7 @@ public:
 
     std::unique_ptr<BoolToggleUI> armUI;
 	std::unique_ptr<ImageButton> keyBT;
+	std::unique_ptr<ImageButton> captureKeyBT;
 	std::unique_ptr<ImageButton> prevKeyBT;
 	std::unique_ptr<ImageButton> nextKeyBT;
 

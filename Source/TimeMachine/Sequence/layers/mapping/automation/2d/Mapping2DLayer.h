@@ -24,6 +24,7 @@ public:
 	virtual var getValueAtPosition(float position) override;
 
 	virtual void stopRecorderAndAddKeys() override;
+	virtual void addKeyAtCurrentTimeFromInput() override;
 
 	SequenceLayerPanel* getPanel() override;
 	SequenceLayerTimeline* getTimelineUI() override;

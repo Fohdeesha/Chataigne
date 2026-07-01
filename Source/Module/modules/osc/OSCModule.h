@@ -66,6 +66,12 @@ public:
 	OSCModule(const String &name = "OSC", int defaultLocalPort = 12000, int defaultRemotePort = 9000, bool canHaveInput = true, bool canHaveOutput = true);
 	~OSCModule();
 
+	//Stops the OSC receiver (and its realtime reader thread) before the item is destroyed.
+	//Called by BaseManager::removeItem while the object is still fully alive, so subclass
+	//members used from the realtime callback (e.g. CustomOSCModule::controllableAddressMap)
+	//are guaranteed not to be accessed by the reader thread after they've been destroyed.
+	virtual void clearItem() override;
+
 
 	NetworkInterfaceParameter* networkInterface;
 

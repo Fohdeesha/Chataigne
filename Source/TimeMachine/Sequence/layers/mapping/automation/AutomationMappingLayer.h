@@ -22,11 +22,19 @@ public:
     enum RecordSendMode { DONOTSEND, SEND_ORIGINAL, SEND_NEW };
     EnumParameter* recordSendMode;
     AutomationRecorder recorder;
-   
+
+    Trigger* addKeyFromInputTrigger;
+
     virtual void setupAutomation(Automation* a);
 
     virtual void updateMappingInputValueInternal() override;
     virtual void stopRecorderAndAddKeys() {}
+
+    //Grabs the current value of the recorder's input and writes it as a key at the playhead
+    juce::var getRecorderInputValue(bool* success = nullptr);
+    virtual void addKeyAtCurrentTimeFromInput() {}
+
+    virtual void onContainerTriggerTriggered(Trigger* t) override;
 
     void selectAll(bool addToSelection = false) override;
 

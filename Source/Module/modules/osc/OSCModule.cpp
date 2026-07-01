@@ -96,6 +96,21 @@ OSCModule::~OSCModule()
 	}
 }
 
+void OSCModule::clearItem()
+{
+	//Stop the realtime OSC receiver thread while this object is still fully constructed.
+	//clearItem() is called by BaseManager::removeItem() BEFORE the destructor runs, so the
+	//reader thread (which calls processMessageInternal -> subclass state) is joined here,
+	//before any subclass member is destroyed. Without this the reader thread could still be
+	//mid-callback when ~CustomOSCModule destroys controllableAddressMap, causing a
+	//use-after-destruction crash (entering a half-destroyed CriticalSection).
+	receiver.disconnect();
+
+	if (isThreadRunning()) stopThread(1000);
+
+	Module::clearItem();
+}
+
 void OSCModule::setupReceiver()
 {
 	receiver.disconnect();

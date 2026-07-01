@@ -52,6 +52,21 @@ void Mapping1DLayer::stopRecorderAndAddKeys()
 
 }
 
+void Mapping1DLayer::addKeyAtCurrentTimeFromInput()
+{
+    bool ok = false;
+    var v = getRecorderInputValue(&ok);
+    if (!ok) return;
+
+    float t = sequence->currentTime->floatValue();
+    float val = (float)v;
+
+    float eps = 0.5f / jmax(1.0f, sequence->fps->floatValue());
+    AutomationKey* k = automation1D.getKeyForPosition(t, true);
+    if (k != nullptr && fabsf(k->position->floatValue() - t) < eps) k->value->setValue(val);
+    else automation1D.addKey(t, val, true);
+}
+
 SequenceLayerPanel* Mapping1DLayer::getPanel()
 {
     return new Mapping1DLayerPanel(this);
