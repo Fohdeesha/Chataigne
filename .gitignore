@@ -58,3 +58,6 @@ Builds/VisualStudio2017_Win7/
 
 .vscode
 
+
+# local JUCE clone (benkuper fork, not a submodule)
+/JUCE/
