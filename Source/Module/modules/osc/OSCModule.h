@@ -58,7 +58,13 @@ private:
 class OSCModule :
 	public Module,
 	public IOSCSenderModule,
-	public OSCReceiver::Listener<OSCReceiver::RealtimeCallback>,
+	//MessageLoopCallback (not RealtimeCallback): OSC messages are delivered on the message
+	//thread. processMessageInternal() traverses AND mutates the controllable tree (auto-add
+	//creates containers/parameters, getControllableByName walks it); doing that on the OSC
+	//network thread races with main-thread edits/teardown and caused use-after-free crashes.
+	//Serializing OSC input onto the message thread is safe per JUCE's threading model. Adds a
+	//message-queue hop of latency; parameter notifications were already message-thread-marshaled.
+	public OSCReceiver::Listener<OSCReceiver::MessageLoopCallback>,
 	public Thread, //for zeroconf async creation (smoother when creating an OSC module)
 	public BaseManager<OSCOutput>::ManagerListener
 { 
