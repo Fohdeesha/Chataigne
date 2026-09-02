@@ -61,9 +61,7 @@ void Mapping1DLayer::addKeyAtCurrentTimeFromInput()
     float t = sequence->currentTime->floatValue();
     float val = (float)v;
 
-    float eps = 0.5f / jmax(1.0f, sequence->fps->floatValue());
-    AutomationKey* k = automation1D.getKeyForPosition(t, true);
-    if (k != nullptr && fabsf(k->position->floatValue() - t) < eps) k->value->setValue(val);
+    if (AutomationKey* k = getKeyToOverwriteAt(&automation1D, t)) k->value->setUndoableValue(k->value->floatValue(), val);
     else automation1D.addKey(t, val, true);
 }
 

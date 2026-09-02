@@ -108,9 +108,7 @@ void Mapping2DLayer::addKeyAtCurrentTimeFromInput()
 	//Pin a timing key at the playhead pointing to the new point's normalized progression along the curve.
 	float norm = curve.length->floatValue() > 0 ? k->curvePosition / curve.length->floatValue() : 0;
 
-	float eps = 0.5f / jmax(1.0f, sequence->fps->floatValue());
-	AutomationKey* ak = automation->getKeyForPosition(t, true);
-	if (ak != nullptr && fabsf(ak->position->floatValue() - t) < eps) ak->value->setValue(norm);
+	if (AutomationKey* ak = getKeyToOverwriteAt(automation, t)) ak->value->setUndoableValue(ak->value->floatValue(), norm);
 	else automation->addKey(t, norm, true);
 }
 

@@ -32,6 +32,7 @@ public:
 
     //Grabs the current value of the recorder's input and writes it as a key at the playhead
     juce::var getRecorderInputValue(bool* success = nullptr);
+    AutomationKey* getKeyToOverwriteAt(Automation* a, float time);
     virtual void addKeyAtCurrentTimeFromInput() {}
 
     virtual void onContainerTriggerTriggered(Trigger* t) override;

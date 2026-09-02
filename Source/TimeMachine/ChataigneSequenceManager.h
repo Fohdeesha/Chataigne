@@ -16,7 +16,8 @@ class ChataigneSequence;
 class SequenceModule;
 
 class ChataigneSequenceManager :
-	public SequenceManager
+	public SequenceManager,
+	public OSCRemoteControl::RemoteControlListener
 {
 public:
 	juce_DeclareSingleton(ChataigneSequenceManager, false)
@@ -25,8 +26,14 @@ public:
 	~ChataigneSequenceManager();
 
 	BoolParameter* snapKeysToFrames;
+	FloatParameter* captureOverwriteDistance;
 
 	Sequence * createItem() override;
+
+	Sequence* getCurrentEditingSequence();
+
+	void processMessage(const juce::OSCMessage& m, const juce::String& clientId) override;
+	void handleCurrentSequenceMessage(const juce::OSCMessage& m);
 
 	std::unique_ptr<SequenceModule> module;
 

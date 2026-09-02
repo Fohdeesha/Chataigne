@@ -33,15 +33,20 @@ void ChataigneApplication::initialiseInternal(const String &)
 	ShapeShifterManager::getInstance()->setDefaultFileData(BinaryData::default_chalayout);
 	ShapeShifterManager::getInstance()->setLayoutInformations("chalayout", "Chataigne/layouts");
 
-	// Set default font to support Chinese characters
-	// On macOS, use PingFang SC which supports Chinese
-	// On Windows, use Microsoft YaHei which supports Chinese
+	// Chinese-language systems only: switch the default sans-serif typeface to one with CJK coverage
+	// (PingFang SC on macOS, Microsoft YaHei on Windows). Upstream applied this unconditionally,
+	// which changed the look of every install (YaHei's Latin glyphs render smaller and thinner than
+	// the JUCE default) and, because MainContentComponent above has already resolved Fonts against
+	// the previous default, left JUCE's glyph cache (keyed on typeface *name*, not the resolved
+	// Typeface) mixing glyphs from both faces so some labels rendered as garbage.
+	if (SystemStats::getUserLanguage().startsWithIgnoreCase("zh"))
+	{
 	#if JUCE_MAC
 		LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypefaceName("PingFang SC");
 	#elif JUCE_WINDOWS
 		LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypefaceName("Microsoft YaHei");
 	#endif
-
+	}
 }
 
 

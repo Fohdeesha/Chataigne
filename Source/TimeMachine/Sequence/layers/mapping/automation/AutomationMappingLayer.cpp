@@ -22,7 +22,7 @@ AutomationMappingLayer::AutomationMappingLayer(const String& name, Sequence* s, 
 	recorder.editorIsCollapsed = true;
 	addChildControllableContainer(&recorder, false, 0);
 
-	addKeyFromInputTrigger = addTrigger("Add Key From Input", "Grab the current value of the recorder's input and write it as a key at the current playhead position. Can be triggered from OSC.");
+	addKeyFromInputTrigger = addTrigger("Add Key From Input", "Grab the current value of the recorder's input and write it as a key at the current playhead position. Can be triggered from OSC, either at this trigger's own address or at /sequences/current/layers/<layer number>/addKeyFromInput to target the sequence currently opened in the editor.");
 
 	uiHeight->setValue(120);
 }
@@ -59,11 +59,50 @@ var AutomationMappingLayer::getRecorderInputValue(bool* success)
 	return val;
 }
 
+AutomationKey* AutomationMappingLayer::getKeyToOverwriteAt(Automation* a, float time)
+{
+	//Overwrite window : the "Capture Overwrite Distance" app setting, floored at half a frame so exact re-captures never duplicate
+	float eps = jmax(0.5f / jmax(1.0f, sequence->fps->floatValue()), ChataigneSequenceManager::getInstance()->captureOverwriteDistance->floatValue());
+
+	//getKeyForPosition only looks backwards, so also check the next key : landing slightly before an existing key must still find it
+	AutomationKey* candidates[2]{ a->getKeyForPosition(time, true), a->getNextKeyForPosition(time, true) };
+
+	AutomationKey* result = nullptr;
+	float bestDist = eps;
+	for (auto& k : candidates)
+	{
+		if (k == nullptr) continue;
+		float dist = fabsf(k->position->floatValue() - time);
+		if (dist <= bestDist)
+		{
+			result = k;
+			bestDist = dist;
+		}
+	}
+
+	return result;
+}
+
 void AutomationMappingLayer::onContainerTriggerTriggered(Trigger* t)
 {
 	MappingLayer::onContainerTriggerTriggered(t);
 
-	if (t == addKeyFromInputTrigger) addKeyAtCurrentTimeFromInput();
+	if (t == addKeyFromInputTrigger)
+	{
+		//OSC Remote Control fires triggers synchronously from its network thread ; key creation touches the automation, the undo history and the UI, so it must happen on the message thread
+		if (MessageManager::getInstance()->isThisTheMessageThread())
+		{
+			addKeyAtCurrentTimeFromInput();
+		}
+		else
+		{
+			WeakReference<Inspectable> weakThis(this);
+			MessageManager::callAsync([weakThis]()
+				{
+					if (AutomationMappingLayer* l = dynamic_cast<AutomationMappingLayer*>(weakThis.get())) l->addKeyAtCurrentTimeFromInput();
+				});
+		}
+	}
 }
 
 void AutomationMappingLayer::updateMappingInputValueInternal()
