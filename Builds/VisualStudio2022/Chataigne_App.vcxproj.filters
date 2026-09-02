@@ -521,7 +521,7 @@
     <Filter Include="Chataigne\Source\Module\modules\gpio\commands">
       <UniqueIdentifier>{8FA46653-8D35-2561-2678-6C2C5C4A06DA}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Chataigne\Source\Module\modules\gpio\pigpio">
+    <Filter Include="Chataigne\Source\Module\modules\gpio\gpiod">
       <UniqueIdentifier>{94621B05-5239-FC4B-AA05-303A72C20012}</UniqueIdentifier>
     </Filter>
     <Filter Include="Chataigne\Source\Module\modules\gpio">
@@ -2065,11 +2065,8 @@
     <ClCompile Include="..\..\Source\Module\modules\gpio\commands\GPIOCommands.cpp">
       <Filter>Chataigne\Source\Module\modules\gpio\commands</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Source\Module\modules\gpio\pigpio\command.c">
-      <Filter>Chataigne\Source\Module\modules\gpio\pigpio</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\Source\Module\modules\gpio\pigpio\pigpio.c">
-      <Filter>Chataigne\Source\Module\modules\gpio\pigpio</Filter>
+    <ClCompile Include="..\..\Source\Module\modules\gpio\gpiod\ChataigneGPIO.c">
+      <Filter>Chataigne\Source\Module\modules\gpio\gpiod</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Source\Module\modules\gpio\GPIOModule.cpp">
       <Filter>Chataigne\Source\Module\modules\gpio</Filter>
@@ -3670,6 +3667,9 @@
     <ClCompile Include="..\..\Modules\juce_organicui\dashboard\SharedTextureDashboardItem.cpp">
       <Filter>JUCE Modules\juce_organicui\dashboard</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Modules\juce_organicui\engine\AppVersion.cpp">
+      <Filter>JUCE Modules\juce_organicui\engine</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Modules\juce_organicui\engine\Engine.cpp">
       <Filter>JUCE Modules\juce_organicui\engine</Filter>
     </ClCompile>
@@ -5112,11 +5112,8 @@
     <ClInclude Include="..\..\Source\Module\modules\gpio\commands\GPIOCommands.h">
       <Filter>Chataigne\Source\Module\modules\gpio\commands</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Source\Module\modules\gpio\pigpio\command.h">
-      <Filter>Chataigne\Source\Module\modules\gpio\pigpio</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\Source\Module\modules\gpio\pigpio\pigpio.h">
-      <Filter>Chataigne\Source\Module\modules\gpio\pigpio</Filter>
+    <ClInclude Include="..\..\Source\Module\modules\gpio\gpiod\ChataigneGPIO.h">
+      <Filter>Chataigne\Source\Module\modules\gpio\gpiod</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Source\Module\modules\gpio\GPIOModule.h">
       <Filter>Chataigne\Source\Module\modules\gpio</Filter>
@@ -6884,6 +6881,9 @@
     </ClInclude>
     <ClInclude Include="..\..\Modules\juce_organicui\dashboard\SharedTextureDashboardItem.h">
       <Filter>JUCE Modules\juce_organicui\dashboard</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Modules\juce_organicui\engine\AppVersion.h">
+      <Filter>JUCE Modules\juce_organicui\engine</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Modules\juce_organicui\engine\Engine.h">
       <Filter>JUCE Modules\juce_organicui\engine</Filter>

@@ -65,32 +65,34 @@ void ModuleManager::showAllValuesAndGetControllable(const StringArray& typeFilte
 
 	const int maxValuesPerModule = 100000;
 
-	getInstance()->modulesMenu.clear();
+	auto menuLookups = std::make_shared<OwnedArray<ControllableChooserPopupMenu>>();
 
 	for (int i = 0; i < numItems; ++i)
 	{
 		Module* m = mList[i];
 		ControllableChooserPopupMenu* vCC = new ControllableChooserPopupMenu(&m->valuesCC, i * maxValuesPerModule, -1, typeFilters, excludeTypeFilters);
-		getInstance()->modulesMenu.add(vCC);
+		menuLookups->add(vCC);
 		if (i == ModuleManager::getInstance()->items.size()) menu.addSeparator(); // Separator between user created module and special modules
 		menu.addSubMenu(m->niceName, *vCC);
 	}
 
-	getInstance()->engineMenu.reset(new ControllableChooserPopupMenu(Engine::mainEngine, -10000000, -1, typeFilters, excludeTypeFilters));
-	menu.addSubMenu("Generic", *getInstance()->engineMenu);
+	auto engineLookup = std::make_shared<ControllableChooserPopupMenu>(Engine::mainEngine, -10000000, -1, typeFilters, excludeTypeFilters);
+	menu.addSubMenu("Generic", *engineLookup);
 
 
-	menu.showMenuAsync(PopupMenu::Options(), [maxValuesPerModule, returnFunc](int result)
+	menu.showMenuAsync(PopupMenu::Options(), [maxValuesPerModule, returnFunc, menuLookups, engineLookup](int result)
 		{
-
+			if (result == 0 || returnFunc == nullptr) return;
 			if (result < 0)
 			{
-				returnFunc(ModuleManager::getInstance()->engineMenu->getControllableForResult(result));
+				returnFunc(engineLookup->getControllableForResult(result));
 			}
 			else
 			{
-				ControllableChooserPopupMenu* mm = ModuleManager::getInstance()->modulesMenu[(int)floorf(result / maxValuesPerModule)];
-				returnFunc(mm->getControllableForResult(result));
+				const int menuIndex = (int)floorf(result / maxValuesPerModule);
+				if (!isPositiveAndBelow(menuIndex, menuLookups->size())) return;
+
+				returnFunc(menuLookups->getUnchecked(menuIndex)->getControllableForResult(result));
 			}
 		}
 	);
@@ -99,23 +101,15 @@ void ModuleManager::showAllValuesAndGetControllable(const StringArray& typeFilte
 
 bool ModuleManager::checkControllableIsAValue(Controllable* c)
 {
+	if (c == nullptr) return false;
+
 	ControllableContainer* cc = c->parentContainer;
 	while (cc != nullptr)
 	{
-		Module* m = dynamic_cast<Module*>(cc); //If controllable is child of a module
-
-		if (c->parentContainer == m || c->parentContainer == &m->moduleParams) return false; //If controllable is direct child of this module, or child 
-
-		if (m != nullptr)
+		if (Module* m = dynamic_cast<Module*>(cc))
 		{
-			ControllableContainer* vcc = c->parentContainer;
-			while (vcc != nullptr)
-			{
-				if (vcc == &m->valuesCC) return true; //If controllable is child of this module's valuesCC
-				vcc = vcc->parentContainer;
-			}
-
-			return false;
+			if (c->parentContainer == m || c->parentContainer == &m->moduleParams) return false;
+			return m->isControllableInValuesContainer(c);
 		}
 
 		cc = cc->parentContainer;

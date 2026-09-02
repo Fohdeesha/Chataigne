@@ -25,6 +25,17 @@ ZeroconfManager::ZeroconfManager() :
 
 ZeroconfManager::~ZeroconfManager()
 {
+	// Ask every browser to stop before OwnedArray destroys them one by one. This
+	// prevents the remaining browsers from continuing to dispatch callbacks while
+	// the manager is already being torn down.
+	for (auto* searcher : searchers)
+	{
+		searcher->signalThreadShouldExit();
+		searcher->notify();
+	}
+
+	// Destroy them now, while the manager's other members are still alive.
+	searchers.clear();
 }
 
 ZeroconfManager::ZeroconfSearcher* ZeroconfManager::addSearcher(StringRef name, StringRef serviceName)
@@ -47,16 +58,16 @@ ZeroconfManager::ZeroconfSearcher* ZeroconfManager::addSearcher(StringRef name, 
 void ZeroconfManager::removeSearcher(StringRef name)
 {
 	ZeroconfSearcher* s = getSearcher(name);
-	if (s == nullptr)
+	if (s != nullptr)
 	{
-		searchers.getLock().enter();
+		GenericScopedLock lock(searchers.getLock());
 		searchers.removeObject(s);
-		searchers.getLock().exit();
 	}
 }
 
 ZeroconfManager::ZeroconfSearcher* ZeroconfManager::getSearcher(StringRef name)
 {
+	GenericScopedLock lock(searchers.getLock());
 	for (auto& s : searchers) if (s->name == name) return s;
 	return nullptr;
 }
@@ -106,12 +117,24 @@ ZeroconfManager::ZeroconfSearcher::ZeroconfSearcher(StringRef name, StringRef se
 
 ZeroconfManager::ZeroconfSearcher::~ZeroconfSearcher()
 {
+	signalThreadShouldExit();
+	notify();
+	const bool stoppedCleanly = stopThread(4000);
+
+	if (stoppedCleanly)
 	{
-		if (servus != nullptr && servus->isBrowsing()) servus->endBrowsing();
-		
 		ScopedLock lock(browseLock);
+		if (servus != nullptr && servus->isBrowsing()) servus->endBrowsing();
 		servus.reset();
-		stopThread(4000);
+	}
+	else
+	{
+		// stopThread() has forcibly terminated a browser that failed to honour
+		// Servus' browse timeout. It may have died while holding browseLock, so
+		// acquiring that lock or destroying the in-use Servus object can deadlock
+		// shutdown. Deliberately leak this one object; when this fallback is needed
+		// it is no longer safe for this process to touch the abandoned object.
+		servus.release();
 	}
 	
 	services.clear();
@@ -233,10 +256,14 @@ String ZeroconfManager::ZeroconfSearcher::getIPForHost(String host)
 
 void ZeroconfManager::ZeroconfSearcher::run()
 {
-	servus.reset(new servus::Servus(String(serviceName).toStdString()));
-	servus->addListener(this);
+	{
+		ScopedLock lock(browseLock);
+		if (threadShouldExit()) return;
 
-	servus->beginBrowsing(servus::Servus::Interface::IF_ALL);
+		servus.reset(new servus::Servus(String(serviceName).toStdString()));
+		servus->addListener(this);
+		servus->beginBrowsing(servus::Servus::Interface::IF_ALL);
+	}
 
 	while (!threadShouldExit())
 	{
