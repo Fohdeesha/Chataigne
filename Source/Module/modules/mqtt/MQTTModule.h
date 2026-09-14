@@ -82,6 +82,7 @@ public:
 	void onControllableFeedbackUpdateInternal(ControllableContainer* cc, Controllable* c) override;
 
 	void publishMessage(const String& topic, const String& message);
+	void handleMessage(const juce::String& topic, const juce::String& data); //message thread only
 
 	void itemAdded(MQTTTopic* item) override;
 	void itemsAdded(Array<MQTTTopic*> item) override;
@@ -103,6 +104,7 @@ public:
 	//mosquitto
 #ifdef MOSQUITTO_SUPPORTED
 	void on_connect(int rc) override;
+	void resubscribeAll(); //message thread only
 	virtual void on_connect_with_flags(int /*rc*/, int /*flags*/) override { return; }
 	virtual void on_disconnect(int rc) override;
 	virtual void on_publish(int mid) override;

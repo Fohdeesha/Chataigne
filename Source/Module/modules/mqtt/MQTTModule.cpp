@@ -213,8 +213,13 @@ void MQTTClientModule::itemsRemoved(Array<MQTTTopic*> items)
 	if (isCurrentlyLoadingData) return;
 
 #ifdef MOSQUITTO_SUPPORTED
-	GenericScopedLock mosqLock(mosquittoLock);
-	for (auto& item : items) unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
+	{
+		//Scoped, like itemRemoved() : holding mosquittoLock across updateTopicSubs() would take
+		//mosquittoLock -> updateTopicLock, the reverse of the order used by updateTopicSubs() and
+		//on_connect(), and removing several topics while the network thread subscribes deadlocked.
+		GenericScopedLock mosqLock(mosquittoLock);
+		for (auto& item : items) unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
+	}
 #endif
 	updateTopicSubs();
 }
@@ -376,18 +381,50 @@ void MQTTClientModule::run()
 
 	if (threadShouldExit()) return;
 
-	// loop_forever reconnects automatically after recoverable network failures.
-	// max_packets is documented as reserved and must be 1.
-	result = loop_forever(-1, 1);
-
+	// loop_forever reconnects automatically after recoverable network failures, but it does give up
+	// on some (a broker that closes the session because another client took our id, for instance).
+	// It used to return straight into the end of run(), leaving the module permanently dead at
+	// isConnected = false while every publish logged "Not connected" - the "stops updating until I
+	// touch a setting" failure. Retry the whole connect/loop cycle instead, with a backoff.
+	int loopRetryDelayMs = 1000;
+	while (!threadShouldExit())
 	{
-		GenericScopedLock mosqLock(mosquittoLock);
-		isConnected->setValue(false);
-		disconnect();
-	}
+		// max_packets is documented as reserved and must be 1.
+		result = loop_forever(-1, 1);
 
-	if (!threadShouldExit() && result != MOSQ_ERR_SUCCESS)
-		NLOGERROR(niceName, "MQTT network loop stopped: " << String(mosqpp::strerror(result)) << " (" << result << ")");
+		{
+			GenericScopedLock mosqLock(mosquittoLock);
+			isConnected->setValue(false);
+			disconnect();
+		}
+
+		if (threadShouldExit()) break;
+
+		if (result == MOSQ_ERR_SUCCESS)
+		{
+			// A clean return with nobody asking us to stop still means the loop is gone.
+			NLOGWARNING(niceName, "MQTT network loop ended unexpectedly, reconnecting...");
+		}
+		else
+		{
+			NLOGWARNING(niceName, "MQTT network loop stopped: " << String(mosqpp::strerror(result))
+				<< " (" << result << "), reconnecting in " << (loopRetryDelayMs / 1000.0f) << "s...");
+		}
+
+		if (wait(loopRetryDelayMs) || threadShouldExit()) break;
+		loopRetryDelayMs = jmin(loopRetryDelayMs * 2, 30000);
+
+		const std::string brokerHost = host->stringValue().toStdString();
+		{
+			GenericScopedLock mosqLock(mosquittoLock);
+			result = connect(brokerHost.c_str(), port->intValue(), keepAlive->intValue());
+		}
+
+		if (result != MOSQ_ERR_SUCCESS)
+			NLOGWARNING(niceName, "MQTT reconnect failed: " << String(mosqpp::strerror(result)) << " (" << result << ")");
+		else
+			loopRetryDelayMs = 1000; //connected again, reset the backoff
+	}
 #endif
 }
 
@@ -451,25 +488,34 @@ var MQTTClientModule::publishMessageFromScript(const var::NativeFunctionArgs& ar
 #ifdef MOSQUITTO_SUPPORTED
 void MQTTClientModule::on_connect(int rc)
 {
-	//LOG("MQTT Connected : " << rc);
-	//DBG("MQTT Connected event reveiced " << rc);
 	isConnected->setValue(rc == 0);
 
-	if (rc != 0) {
+	if (rc != 0)
+	{
+		NLOGWARNING(niceName, "MQTT connection refused by the broker (rc=" << rc << ") : " << String(mosqpp::connack_string(rc)));
 		return;
 	}
 
-	GenericScopedLock lock(updateTopicLock);
+	NLOG(niceName, "Connected to " << host->stringValue() << ":" << port->intValue() << " as " << clientId->stringValue());
 
-	//Subscribe
-	{
-		GenericScopedLock mosqLock(mosquittoLock);
-		for (auto& t : topicsManager.items)
+	//Resubscribing walks topicsManager and creates no model objects, but the walk still races with
+	//topic add/remove on the main thread, so do it there instead of on the network thread.
+	WeakReference<Inspectable> weakThis(this);
+	MessageManager::callAsync([weakThis]()
 		{
-			String topic = t->topic->stringValue();
-			if (topic.isEmpty()) continue;
-			subscribe(&t->mid, topic.toStdString().c_str());
-		}
+			if (MQTTClientModule* m = dynamic_cast<MQTTClientModule*>(weakThis.get())) m->resubscribeAll();
+		});
+}
+
+void MQTTClientModule::resubscribeAll()
+{
+	GenericScopedLock lock(updateTopicLock);
+	GenericScopedLock mosqLock(mosquittoLock); //same order as updateTopicSubs() : updateTopicLock first
+	for (auto& t : topicsManager.items)
+	{
+		String topic = t->topic->stringValue();
+		if (topic.isEmpty()) continue;
+		subscribe(&t->mid, topic.toStdString().c_str());
 	}
 }
 
@@ -487,17 +533,52 @@ void MQTTClientModule::on_disconnect(int rc)
 
 void MQTTClientModule::on_publish(int mid)
 {
-	outActivityTrigger->trigger();
+	//Trigger::trigger() dispatches its listeners synchronously, so firing it from the network thread
+	//would run UI listeners there.
+	if (MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		outActivityTrigger->trigger();
+		return;
+	}
+
+	WeakReference<Inspectable> weakThis(this);
+	MessageManager::callAsync([weakThis]()
+		{
+			if (MQTTClientModule* m = dynamic_cast<MQTTClientModule*>(weakThis.get())) m->outActivityTrigger->trigger();
+		});
 }
 
 void MQTTClientModule::on_message(const mosquitto_message* message)
 {
 	if (!enabled->boolValue()) return;
+	if (message == nullptr || message->topic == nullptr) return;
+
+	//This runs on libmosquitto's network thread. Everything the handling does - creating
+	//controllables from JSON, walking valuesCC, running scripts, firing triggers - touches the model
+	//and must happen on the message thread, the same reason OSCModule moved to MessageLoopCallback.
+	//The mosquitto_message is only valid for the duration of this call, so copy it out first.
+	String topic(message->topic);
+	String data(message->payloadlen > 0 ? String::fromUTF8((const char*)message->payload, message->payloadlen) : String());
+
+	if (MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		handleMessage(topic, data);
+		return;
+	}
+
+	WeakReference<Inspectable> weakThis(this);
+	MessageManager::callAsync([weakThis, topic, data]()
+		{
+			if (MQTTClientModule* m = dynamic_cast<MQTTClientModule*>(weakThis.get())) m->handleMessage(topic, data);
+		});
+}
+
+void MQTTClientModule::handleMessage(const String& topic, const String& data)
+{
+	if (!enabled->boolValue()) return;
 
 	GenericScopedLock lock(updateTopicLock);
 
-	String topic(message->topic);
-	String data((char*)message->payload, message->payloadlen);
 	Array<var> args;
 
 	if (logIncomingData->boolValue())
@@ -564,11 +645,25 @@ void MQTTClientModule::on_unsubscribe(int mid)
 void MQTTClientModule::on_log(int level, const char* str)
 {
 	DBG("Log (" << level << ") " << String(str));
+
+	//libmosquitto's own diagnosis of a dropped or timed-out connection only ever arrives here. It
+	//used to go to DBG alone, i.e. nowhere in a Release build, which made "timeout" reports
+	//impossible to explain. Warnings and errors now reach the log; NOTICE/INFO/DEBUG stay out of it,
+	//and PING traffic is dropped so a keepalive does not spam the log every keepAlive seconds.
+	if (str == nullptr) return;
+	if (level != MOSQ_LOG_WARNING && level != MOSQ_LOG_ERR) return;
+
+	String s(str);
+	if (s.containsIgnoreCase("PINGREQ") || s.containsIgnoreCase("PINGRESP")) return;
+
+	if (level == MOSQ_LOG_ERR) NLOGERROR(niceName, "MQTT: " << s);
+	else NLOGWARNING(niceName, "MQTT: " << s);
 }
 
 void MQTTClientModule::on_error()
 {
-	NLOGERROR(niceName, "Error !");
+	NLOGERROR(niceName, "MQTT socket error while talking to " << host->stringValue() << ":" << port->intValue()
+		<< " (client id \"" << clientId->stringValue() << "\" - a second client using the same id makes the broker drop this one)");
 	isConnected->setValue(false);
 }
 #endif
