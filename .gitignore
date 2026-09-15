@@ -63,3 +63,6 @@ Builds/VisualStudio2022_CI/x64/
 
 # local JUCE clone (benkuper fork, not a submodule)
 /JUCE/
+
+# build identity header written by tools/build/stamp_build.py before every build
+Source/BuildInfo.h

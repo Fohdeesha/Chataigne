@@ -6,6 +6,7 @@
 #endif
 
 #include "Module/ModuleIncludes.h"
+#include "BuildId.h"
 
 //==============================================================================
 
@@ -58,6 +59,9 @@ void ChataigneApplication::initialiseInternal(const String &)
 		LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypefaceName("Microsoft YaHei");
 	#endif
 	}
+
+	//the commit this binary was built from, right under the logger's welcome line (see BuildId.h)
+	LOG("Build " << CHATAIGNE_BUILD_ID);
 }
 
 
