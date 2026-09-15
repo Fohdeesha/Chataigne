@@ -217,6 +217,13 @@ void AutomationMappingLayer::sequenceLooped(Sequence* s)
 	if (recorder.isRecording->boolValue()) stopRecorderAndAddKeys();
 }
 
+bool AutomationMappingLayer::canEvaluateOnPlayThread()
+{
+	//Recording is an editing activity and stays on the message thread. An armed recorder starts when the sequence plays,
+	//possibly after the play thread's first tick, so it is excluded from the arm itself.
+	return !recorder.isRecording->boolValue() && !recorder.arm->boolValue();
+}
+
 bool AutomationMappingLayer::paste()
 {
 	var data = JSON::fromString(SystemClipboard::getTextFromClipboard());

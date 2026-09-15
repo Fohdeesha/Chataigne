@@ -43,6 +43,14 @@ MappingLayer::~MappingLayer()
 {
 }
 
+void MappingLayer::clearItem()
+{
+	//Leave the play thread before any member is destroyed : SequenceLayer only unregisters in its destructor, which runs
+	//after the mapping and the automation are gone, and removeSequenceListener waits for a tick in progress.
+	if (!sequence->isClearing) sequence->removeSequenceListener(this);
+	SequenceLayer::clearItem();
+}
+
 void MappingLayer::setupMappingInputParameter(Parameter* source)
 {
 	jassert(mappingInput == nullptr);
@@ -55,13 +63,50 @@ void MappingLayer::setupMappingInputParameter(Parameter* source)
 
 	mapping->lockInputTo(mappingInput);
 	updateMappingInputValue();
+
+	mappingInputReady = true;
 }
 
 void MappingLayer::updateMappingInputValue(bool forceOutput)
 {
 	if (!enabled->boolValue() || !sequence->enabled->boolValue()) return;
+
+	if (evaluatesOnPlayThread())
+	{
+		//the play thread sets the input and processes the mapping itself (sequencePlayThreadTick)
+		if (forceOutput) forceProcessOnNextTick = true;
+		return;
+	}
+
 	updateMappingInputValueInternal();
 	if (forceOutput || alwaysUpdate->boolValue()) mapping->process(true);
+}
+
+bool MappingLayer::evaluatesOnPlayThread()
+{
+	//Same predicate on both threads, from live state only, so the two paths can never both send a frame or both skip it
+	return mappingInputReady && sequence->isPlaying->boolValue() && sequence->isThreadRunning()
+		&& enabled->boolValue() && sequence->enabled->boolValue()
+		&& !mapping->isThreadRunning() //a mapping with continuous filters is driven by its own timer thread
+		&& canEvaluateOnPlayThread();
+}
+
+void MappingLayer::sequencePlayThreadTick(Sequence*, float time)
+{
+	if (!evaluatesOnPlayThread()) return;
+
+	var prevValue = mappingInput->getValue();
+	mappingInput->setValue(getValueAtPosition(time), true); //silent : no listener hop, the mapping is processed right here
+	var newValue = mappingInput->getValue();
+	bool changed = !mappingInput->checkValueIsTheSame(newValue, prevValue);
+
+	//the silent set skipped the UI event : keep the inspector's value display alive (queued, coalesced on the message thread)
+	if (changed) mappingInput->queuedNotifier.addMessage(new Parameter::ParameterEvent(Parameter::ParameterEvent::VALUE_CHANGED, mappingInput, newValue));
+
+	if (!changed && !alwaysUpdate->boolValue() && !forceProcessOnNextTick.exchange(false)) return;
+
+	//never wait for an edit in progress on the message thread : the next frame processes whatever it finds
+	if (!mapping->processIfFree(true)) forceProcessOnNextTick = true;
 }
 
 void MappingLayer::updateMappingInputValueInternal()
@@ -159,6 +204,11 @@ void MappingLayer::sequencePlayStateChanged(Sequence * s)
 	if (!enabled->boolValue() || !sequence->enabled->boolValue()) return;
 
 	sequencePlayStateChangedInternal(s);
+
+	//When playback stops, the message-thread evaluation may lag the play thread by a frame or two (its time-changed
+	//notifications are still queued) : bring it up to the playhead first, otherwise the stop send below would carry the
+	//older value and step backwards before the queued notification catches up.
+	if (!sequence->isPlaying->boolValue()) sequenceCurrentTimeChanged(s, sequence->currentTime->floatValue(), false);
 
 	bool updateAndProcess = (sequence->isPlaying->boolValue() && sendOnPlay->boolValue()) || (!sequence->isPlaying->boolValue() && sendOnStop->boolValue());
 	if (updateAndProcess) updateMappingInputValue(true);

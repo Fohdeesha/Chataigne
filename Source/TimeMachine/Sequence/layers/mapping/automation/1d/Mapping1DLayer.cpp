@@ -37,6 +37,8 @@ Mapping1DLayer::~Mapping1DLayer()
 
 var Mapping1DLayer::getValueAtPosition(float position)
 {
+    //also called from the sequence play thread while keys may be edited on the message thread
+    const ScopedLock sl(automation1D.items.getLock());
     return automation1D.getValueAtPosition(position);
 }
 
@@ -61,6 +63,8 @@ void Mapping1DLayer::addKeyAtCurrentTimeFromInput()
     float t = sequence->currentTime->floatValue();
     float val = (float)v;
 
+    //the key lock makes the whole capture atomic for the play thread, which may be evaluating this automation right now
+    const ScopedLock sl(automation1D.items.getLock());
     if (AutomationKey* k = getKeyToOverwriteAt(&automation1D, t)) k->value->setUndoableValue(k->value->floatValue(), val);
     else automation1D.addKey(t, val, true);
 }

@@ -55,6 +55,7 @@ public:
 	virtual void multiplexPreviewIndexChanged() override;
 
 	void process(bool sendOutput = true, int multiplexIndex = -1, bool forceSend = false);
+	bool processIfFree(bool sendOutput = true, int multiplexIndex = -1, bool forceSend = false); //process() unless another thread holds the mapping : never waits
 
 	void updateContinuousProcess();
 

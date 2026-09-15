@@ -52,6 +52,8 @@ public:
     virtual void sequencePlayStateChangedInternal(Sequence* s) override;
     virtual void sequenceLooped(Sequence *s) override;
 
+    virtual bool canEvaluateOnPlayThread() override;
+
     virtual bool paste() override;
 
     SequenceLayerPanel* getPanel() override;

@@ -48,5 +48,19 @@ public:
 	void sequencePlayStateChanged(Sequence*) override;
 	virtual void sequencePlayStateChangedInternal(Sequence*) {}
 
+	//Play-thread evaluation. While the sequence plays, its play thread evaluates this layer at the precise frame time and
+	//sends the result itself (sequencePlayThreadTick), so the output does not wait for the message thread, which is also
+	//the thread that paints the interface. The message-thread path (sequenceCurrentTimeChanged -> automation value ->
+	//updateMappingInputValue) keeps driving the cursor and the value displays, but must not send while the play thread does,
+	//or it would queue an older value behind the play thread's. getValueAtPosition is then called from the play thread :
+	//implementations must hold their key lock.
+	std::atomic<bool> mappingInputReady{ false }; //set once setupMappingInputParameter is done, so a tick never sees a half-built layer
+	std::atomic<bool> forceProcessOnNextTick{ false }; //a forced update (send on play / seek) or a frame skipped because the mapping was busy
+	bool evaluatesOnPlayThread();
+	virtual bool canEvaluateOnPlayThread() { return true; }
+	void sequencePlayThreadTick(Sequence* s, float time) override;
+
+	virtual void clearItem() override;
+
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MappingLayer)
 };

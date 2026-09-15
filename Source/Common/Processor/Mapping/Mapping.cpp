@@ -311,11 +311,36 @@ void Mapping::process(bool sendOutput, int multiplexIndex, bool forceSend)
 	if (shouldRebuildAfterProcess)
 	{
 		shouldRebuildAfterProcess = false;
-		updateMappingChain();
+
+		//a rebuild creates and destroys controllables : when process() ran on the mapping's timer thread or on a sequence
+		//play thread, hand the rebuild to the message thread instead of doing it here
+		if (MessageManager::getInstance()->isThisTheMessageThread()) updateMappingChain();
+		else
+		{
+			WeakReference<Inspectable> weakThis(this);
+			MessageManager::callAsync([weakThis]()
+				{
+					if (Mapping* m = dynamic_cast<Mapping*>(weakThis.get())) m->updateMappingChain();
+				});
+		}
 	}
 
 	//DBG("[PROCESS] Exit lock");
 
+}
+
+bool Mapping::processIfFree(bool sendOutput, int multiplexIndex, bool forceSend)
+{
+	//For a timing-critical caller (a sequence play thread) : an edit in progress on the message thread must not stall it,
+	//so the frame is skipped instead of waited for. Both locks are taken in the order process() takes them, so once they
+	//are held here process() cannot block.
+	const ScopedTryLock mappingTryLock(mappingLock);
+	if (!mappingTryLock.isLocked()) return false;
+	const ScopedTryLock filterTryLock(fm.filterLock);
+	if (!filterTryLock.isLocked()) return false;
+
+	process(sendOutput, multiplexIndex, forceSend);
+	return true;
 }
 
 void Mapping::updateContinuousProcess()

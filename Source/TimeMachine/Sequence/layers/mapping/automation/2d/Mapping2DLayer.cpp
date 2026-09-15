@@ -41,6 +41,10 @@ void Mapping2DLayer::addDefaultContent()
 
 var Mapping2DLayer::getValueAtPosition(float position)
 {
+	//also called from the sequence play thread while keys may be edited on the message thread (same lock order as the capture below)
+	const ScopedLock curveLock(curve.items.getLock());
+	const ScopedLock automationLock(automation->items.getLock());
+
 	Point<float> p = curve.getValueAtNormalizedPosition((float)automation->getNormalizedValueAtPosition(position));
 	var result;
 	result.append(p.x);
@@ -98,6 +102,10 @@ void Mapping2DLayer::addKeyAtCurrentTimeFromInput()
 
 	Point<float> p((float)v[0], (float)v[1]);
 	float t = sequence->currentTime->floatValue();
+
+	//the key locks make the whole capture atomic for the play thread, which may be evaluating this layer right now
+	const ScopedLock curveLock(curve.items.getLock());
+	const ScopedLock automationLock(automation->items.getLock());
 
 	//Append the captured point to the spatial curve. updateCurve() (called on add) recomputes curvePosition and length.
 	//Note : a capture adds two objects (a spatial curve point + a timing key), so it takes two undo steps to fully revert.

@@ -38,6 +38,8 @@ void ColorMappingLayer::addDefaultContent()
 
 var ColorMappingLayer::getValueAtPosition(float position)
 {
+    //also called from the sequence play thread while colors may be edited on the message thread
+    const ScopedLock sl(colorManager.items.getLock());
     Colour c = colorManager.getColorForPosition(position);
     var result;
     result.append(c.getFloatRed());
