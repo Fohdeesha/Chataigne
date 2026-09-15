@@ -1,0 +1,53 @@
+#pragma once
+
+#define ORGANICUI_DEFAULT_TIMER 0
+#define ORGANICUI_SLOW_TIMER 1
+
+#define ORGANICUI_FPS_TIMER 99
+
+//#define ORGANICUI_LOG_FPS_DEBUG
+
+
+class UITimerTarget
+{
+public:
+	UITimerTarget(int timerID = -1, juce::String _name = "", bool safeRepaintCheck = false);
+	virtual ~UITimerTarget();
+
+	int paintTimerID;
+	bool shouldRepaint;
+	bool paintingAsked;
+	bool safeRepaintCheck;
+	juce::uint32 lastRepaintTime;
+
+	juce::String name;
+
+
+	virtual void handlePaintTimer();
+	virtual void handlePaintTimerInternal() = 0;
+	virtual void validatePaint();
+
+
+	juce::WeakReference<UITimerTarget>::Master masterReference;
+	friend class juce::WeakReference<UITimerTarget>;
+};
+
+class OrganicUITimers :
+	public juce::MultiTimer
+{
+public:
+	juce_DeclareSingleton(OrganicUITimers, true);
+	OrganicUITimers();
+	~OrganicUITimers() {}
+
+	juce::HashMap<int, juce::Array<juce::WeakReference<UITimerTarget>>> timerMap;
+#ifdef ORGANICUI_LOG_FPS_DEBUGs
+	juce::HashMap<int, int> fps;
+#endif
+
+	void setupTimers();
+
+	void registerTarget(int timerID, UITimerTarget* ui);
+	void unregisterTarget(int timerID, UITimerTarget* ui);
+	void timerCallback(int timerID);
+};

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<JUCERPROJECT id="nJCeN1" name="organicui_resources" projectType="guiapp" version="1.0.0"
+              bundleIdentifier="com.benkuper.organicui_resources" includeBinaryInAppConfig="1"
+              displaySplashScreen="1" reportAppUsage="1" splashScreenColour="Dark"
+              companyCopyright="" binaryDataNamespace="OrganicUIBinaryData"
+              jucerFormatVersion="1">
+  <MAINGROUP id="gdPnjI" name="organicui_resources">
+    <GROUP id="{471DD8BF-5339-7ED5-BF79-1FCB0A8A6B3D}" name="Resources">
+      <FILE id="zCaAEj" name="add.png" compile="0" resource="1" file="Resources/add.png"/>
+      <FILE id="Fodrzo" name="align_bottom.png" compile="0" resource="1"
+            file="Resources/align_bottom.png"/>
+      <FILE id="I5EVXS" name="align_center_h.png" compile="0" resource="1"
+            file="Resources/align_center_h.png"/>
+      <FILE id="hH2fju" name="align_center_v.png" compile="0" resource="1"
+            file="Resources/align_center_v.png"/>
+      <FILE id="mnNvOx" name="align_left.png" compile="0" resource="1" file="Resources/align_left.png"/>
+      <FILE id="XiC4RV" name="align_right.png" compile="0" resource="1" file="Resources/align_right.png"/>
+      <FILE id="mhO9YL" name="align_top.png" compile="0" resource="1" file="Resources/align_top.png"/>
+      <FILE id="aoTRXK" name="arrow-down.png" compile="0" resource="1" file="Resources/arrow-down.png"/>
+      <FILE id="uBzQVv" name="arrow-right.png" compile="0" resource="1" file="Resources/arrow-right.png"/>
+      <FILE id="AQujp8" name="cancel.png" compile="0" resource="1" file="Resources/cancel.png"/>
+      <FILE id="XHa6p5" name="check.png" compile="0" resource="1" file="Resources/check.png"/>
+      <FILE id="AqOQVt" name="checkbox_off.png" compile="0" resource="1"
+            file="Resources/checkbox_off.png"/>
+      <FILE id="yNmH7w" name="checkbox_off_readonly.png" compile="0" resource="1"
+            file="Resources/checkbox_off_readonly.png"/>
+      <FILE id="dYEB6a" name="checkbox_on.png" compile="0" resource="1" file="Resources/checkbox_on.png"/>
+      <FILE id="lFWTK3" name="checkbox_on_readonly.png" compile="0" resource="1"
+            file="Resources/checkbox_on_readonly.png"/>
+      <FILE id="LR4MYG" name="distribute_h.png" compile="0" resource="1"
+            file="Resources/distribute_h.png"/>
+      <FILE id="khEw49" name="distribute_v.png" compile="0" resource="1"
+            file="Resources/distribute_v.png"/>
+      <FILE id="yRr25C" name="down.png" compile="0" resource="1" file="Resources/down.png"/>
+      <FILE id="bcZqFF" name="drag.png" compile="0" resource="1" file="Resources/drag.png"/>
+      <FILE id="UEC663" name="duplicate.png" compile="0" resource="1" file="Resources/duplicate.png"/>
+      <FILE id="JhfeGX" name="edit.png" compile="0" resource="1" file="Resources/edit.png"/>
+      <FILE id="T2Mumh" name="explorer.png" compile="0" resource="1" file="Resources/explorer.png"/>
+      <FILE id="gfgQyR" name="eye.png" compile="0" resource="1" file="Resources/eye.png"/>
+      <FILE id="bcK2wO" name="file.png" compile="0" resource="1" file="Resources/file.png"/>
+      <FILE id="Lih37O" name="in.png" compile="0" resource="1" file="Resources/in.png"/>
+      <FILE id="KnEPmE" name="minus.png" compile="0" resource="1" file="Resources/minus.png"/>
+      <FILE id="QKRm2O" name="out.png" compile="0" resource="1" file="Resources/out.png"/>
+      <FILE id="wN1HOW" name="padlock.png" compile="0" resource="1" file="Resources/padlock.png"/>
+      <FILE id="B22L9I" name="pin.png" compile="0" resource="1" file="Resources/pin.png"/>
+      <FILE id="C97VIu" name="power.png" compile="0" resource="1" file="Resources/power.png"/>
+      <FILE id="avHafs" name="relative.png" compile="0" resource="1" file="Resources/relative.png"/>
+      <FILE id="OR6cVw" name="reload.png" compile="0" resource="1" file="Resources/reload.png"/>
+      <FILE id="K6dyge" name="settings.png" compile="0" resource="1" file="Resources/settings.png"/>
+      <FILE id="jyleTp" name="show_grid.png" compile="0" resource="1" file="Resources/show_grid.png"/>
+      <FILE id="XTAwXe" name="snap_grid.png" compile="0" resource="1" file="Resources/snap_grid.png"/>
+      <FILE id="ZVsExK" name="target.png" compile="0" resource="1" file="Resources/target.png"/>
+      <FILE id="FixPlj" name="trigger.png" compile="0" resource="1" file="Resources/trigger.png"/>
+      <FILE id="utiCOQ" name="uncheck.png" compile="0" resource="1" file="Resources/uncheck.png"/>
+      <FILE id="MobXh0" name="up.png" compile="0" resource="1" file="Resources/up.png"/>
+      <FILE id="BzkqMx" name="warning.png" compile="0" resource="1" file="Resources/warning.png"/>
+    </GROUP>
+    <GROUP id="{279380FE-558A-8939-19FF-B071B9CB7AF4}" name="Source"/>
+  </MAINGROUP>
+  <EXPORTFORMATS>
+    <VS2022 targetFolder="Builds/VisualStudio2022">
+      <CONFIGURATIONS>
+        <CONFIGURATION isDebug="1" name="Debug"/>
+        <CONFIGURATION isDebug="0" name="Release"/>
+      </CONFIGURATIONS>
+      <MODULEPATHS>
+        <MODULEPATH id="juce_audio_basics" path="../../juce"/>
+        <MODULEPATH id="juce_audio_devices" path="../../juce"/>
+        <MODULEPATH id="juce_audio_formats" path="../../juce"/>
+        <MODULEPATH id="juce_audio_processors" path="../../juce"/>
+        <MODULEPATH id="juce_core" path="../../juce"/>
+        <MODULEPATH id="juce_cryptography" path="../../juce"/>
+        <MODULEPATH id="juce_data_structures" path="../../juce"/>
+        <MODULEPATH id="juce_events" path="../../juce"/>
+        <MODULEPATH id="juce_graphics" path="../../juce"/>
+        <MODULEPATH id="juce_gui_basics" path="../../juce"/>
+        <MODULEPATH id="juce_gui_extra" path="../../juce"/>
+        <MODULEPATH id="juce_opengl" path="../../juce"/>
+        <MODULEPATH id="juce_video" path="../../juce"/>
+      </MODULEPATHS>
+    </VS2022>
+  </EXPORTFORMATS>
+  <MODULES>
+    <MODULE id="juce_audio_basics" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_audio_devices" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_audio_formats" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_audio_processors" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_core" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_cryptography" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_data_structures" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_events" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_graphics" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_gui_basics" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_gui_extra" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_opengl" showAllCode="1" useLocalCopy="0"/>
+    <MODULE id="juce_video" showAllCode="1" useLocalCopy="0"/>
+  </MODULES>
+  <JUCEOPTIONS/>
+  <LIVE_SETTINGS>
+    <WINDOWS/>
+  </LIVE_SETTINGS>
+</JUCERPROJECT>
