@@ -4,7 +4,7 @@
 //and that commit's date. Shown in the About window and logged at startup, so a running instance can be matched to a
 //commit without touching the version string, which the Welcome window, the file-format migration, every saved file
 //and the update checker all key on.
-//BuildInfo.h is written by tools/build/stamp_build.py before every build and is not committed.
+//BuildInfo.h is generated before every build and is not committed, so a plain checkout still builds.
 #if __has_include("BuildInfo.h")
 #include "BuildInfo.h"
 #else
