@@ -509,7 +509,7 @@ void Mapping::run()
 {
 	wait(50); //make sure direct calls have been done before running this (especially if it was loading)
 
-	double millis;
+	const double loopStartMillis = Time::getMillisecondCounterHiRes();
 
 	while (!threadShouldExit())
 	{
@@ -521,16 +521,13 @@ void Mapping::run()
 			continue;
 		}
 
-		millis = Time::getMillisecondCounterHiRes();
-
 		process();
 
-		double newMillis = Time::getMillisecondCounterHiRes();
-
-		double millisToWait = rateMillis - jlimit<double>(0, rateMillis, newMillis - millis);
-		millis = newMillis;
-
-		if (millisToWait > 0) wait(millisToWait);
+		//Sleep until the next slot of a fixed grid anchored at loop start, so the rate does not drift below updateRate
+		//by the millisecond rounding and wake-up latency of every wait (same scheme as Sequence::run)
+		double elapsed = Time::getMillisecondCounterHiRes() - loopStartMillis;
+		double nextSlot = (floor(elapsed / rateMillis) + 1) * rateMillis;
+		wait(nextSlot - elapsed);
 	}
 }
 
