@@ -31,6 +31,13 @@ void CVVariable::setupBinding()
 
 	binding.reset(new CVBinding(this));
 	addChildControllableContainer(binding.get());
+
+	//GenericControllableItem sets editorCanBeCollapsed = false, because upstream's item editor has
+	//no content to hide : its resetAndBuild() is a no-op. Ours builds the Binding section, and with
+	//that flag false GenericControllableContainerEditor draws no expand arrow at all, so a variable
+	//row stayed one line and the binding could not be reached from the UI - the item is created
+	//collapsed. Let the row expand, and leave it collapsed so a group's list stays compact.
+	editorCanBeCollapsed = true;
 }
 
 void CVVariable::onContainerParameterChangedInternal(Parameter* p)
