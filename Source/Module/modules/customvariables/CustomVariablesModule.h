@@ -62,6 +62,9 @@ public:
 
 	void itemAdded(GenericControllableItem*) override;
 	void itemRemoved(GenericControllableItem*) override;
+	//BaseManager fires ONLY these when several items move at once - see the note in the .cpp
+	void itemsAdded(juce::Array<GenericControllableItem*>) override;
+	void itemsRemoved(juce::Array<GenericControllableItem*>) override;
 	void itemsReordered() override;
 	void enumOptionAdded(EnumParameter* source, const String&) override;
 	void enumOptionUpdated(EnumParameter* source, int index, const String&, const String&) override;

@@ -264,6 +264,26 @@ void GenericControllableManagerLinkedContainer::itemRemoved(GenericControllableI
 	}
 }
 
+//BaseManager::addItems() and removeItems() call addItem()/removeItem() with notify = false and then
+//fire ONLY the plural callbacks, so the singular ones above never run for them. Paste, duplicate and
+//a multi-item delete all take that route, and paste takes it even for a single item
+//(addItemsFromClipboard -> addItemsFromData -> addItems). Without these the module's mirror of the
+//group drifts out of step with it: a pasted variable gets no value under
+///modules/customVariables/values/<group>, so it cannot be a mapping input or a dashboard target, and
+//a multi-item delete leaves orphan values behind whose linkMap entry still points at the source
+//parameter that was just deleted - a dangling pointer that getSourceForParameter() will hand out.
+//PresetParameterContainer overrides all four for the same reason.
+void GenericControllableManagerLinkedContainer::itemsAdded(Array<GenericControllableItem*> items)
+{
+	for (auto& gci : items) itemAdded(gci);
+}
+
+void GenericControllableManagerLinkedContainer::itemsRemoved(Array<GenericControllableItem*> items)
+{
+	//the items are still alive here : removeItems() notifies before it calls clearItem() and deletes
+	for (auto& gci : items) itemRemoved(gci);
+}
+
 void GenericControllableManagerLinkedContainer::itemsReordered()
 {
 	controllables.sort(linkedComparator);
