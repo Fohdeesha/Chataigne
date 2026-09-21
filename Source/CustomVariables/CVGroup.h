@@ -36,6 +36,9 @@ public:
 		ValuesManager();
 		~ValuesManager();
 
+		//shadows the non-virtual base version so CVVariables (bindable) are created instead
+		GenericControllableItem* addItemFrom(Controllable* c, bool copyValue = true);
+
 		void addAllItemsToDashboard(Dashboard* d);
 
 		InspectableEditor* getEditorInternal(bool isRoot, Array<Inspectable*> inspectables = Array<Inspectable*>()) override;

@@ -436,6 +436,37 @@ void CVGroup::run()
 CVGroup::ValuesManager::ValuesManager() :
 	GenericControllableManager("Variables", false, false, true, true)
 {
+	//Replace the stock GenericControllableItem definitions with CVVariable ones, keeping the
+	//SAME type strings so that projects saved before bindings existed load unchanged (and gain
+	//an inert binding). Done here rather than in juce_organicui so the submodule stays untouched.
+	factory.defs.clear();
+
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Float Parameter", &CVVariable::create)->addParam("controllableType", FloatParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Int Parameter", &CVVariable::create)->addParam("controllableType", IntParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Bool Parameter", &CVVariable::create)->addParam("controllableType", BoolParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "String Parameter", &CVVariable::create)->addParam("controllableType", StringParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Color Parameter", &CVVariable::create)->addParam("controllableType", ColorParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Point2D Parameter", &CVVariable::create)->addParam("controllableType", Point2DParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Point3D Parameter", &CVVariable::create)->addParam("controllableType", Point3DParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Enum Parameter", &CVVariable::create)->addParam("controllableType", EnumParameter::getTypeStringStatic()));
+	factory.defs.add(Factory<GenericControllableItem>::Definition::createDef("", "Target Parameter", &CVVariable::create)->addParam("controllableType", TargetParameter::getTypeStringStatic()));
+}
+
+GenericControllableItem* CVGroup::ValuesManager::addItemFrom(Controllable* sourceC, bool copyValue)
+{
+	//GenericControllableManager::addItemFrom hardcodes `new GenericControllableItem`, so the
+	//"Add & Link to Custom Variable..." path would otherwise produce an unbindable item.
+	if (sourceC == nullptr) return nullptr;
+
+	Controllable* c = nullptr;
+	if (Parameter* sourceP = dynamic_cast<Parameter*>(sourceC)) c = ControllableFactory::createParameterFrom(sourceP, true, copyValue);
+	else c = new Trigger(sourceC->niceName, sourceC->description);
+
+	if (c == nullptr) return nullptr;
+
+	var params = new DynamicObject();
+	params.getDynamicObject()->setProperty("type", getTypeForControllableType(c->getTypeString()));
+	return addItem(new CVVariable(c, params));
 }
 
 CVGroup::ValuesManager::~ValuesManager()

@@ -20,8 +20,17 @@
 #include "Preset/Morpher/jc_voronoi.h"
 #include "Preset/Morpher/Morpher.h"
 
+//Bindings. CVBinding.h only forward-declares MappingOutputManager : including
+//BaseCommandHandler.h from here would be circular (it pulls in ModuleIncludes.h,
+//which pulls in CustomVariablesModule.h, which pulls in this file).
+#include "Binding/CVValueMap.h"
+#include "Binding/CVBinding.h"
+#include "CVVariable.h"
+
 #include "CVGroup.h"
 #include "CVGroupManager.h"
+
+#include "ui/CVVariableEditor.h"
 
 #include "Preset/Morpher/ui/CVPresetMorphUI.h"
 #include "Preset/Morpher/ui/MorphTargetUI.h"
