@@ -72,6 +72,11 @@ public:
 	BaseManager<MQTTTopic> topicsManager;
 	std::atomic<uint32> lastPublishWarningTime { 0 };
 
+	//What clientId resolved to for the current connection. Written in run() before connecting and
+	//read by the mosquitto callbacks, which libmosquitto calls from inside loop_forever(), i.e. on
+	//this same thread.
+	String resolvedClientId;
+
 
 
 	const Identifier dataEventId = "dataEvent";
@@ -97,6 +102,7 @@ public:
 
 	void stopClient();
 	bool shouldLogPublishWarning();
+	String resolveClientId() const;
 
 	//Script
 	static var publishMessageFromScript(const var::NativeFunctionArgs& args);

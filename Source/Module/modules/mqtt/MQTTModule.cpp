@@ -57,7 +57,7 @@ MQTTClientModule::MQTTClientModule(const String& name, bool canHaveInput, bool c
 	protocol = moduleParams.addEnumParameter("Default Protocol", "How to parse the incoming data");
 	protocol->addOption("JSON", MQTTTopic::JSON)->addOption("Raw", MQTTTopic::RAW);
 
-	clientId = moduleParams.addStringParameter("Client ID", "The client ID to use. Needs to be unique", "Chataigne");
+	clientId = moduleParams.addStringParameter("Client ID", "The client ID to use. It must be unique on the broker : when a second client connects with the same one, the broker disconnects the first. \"{machine}\" is replaced by this computer's name, so one project can be opened on several machines without them evicting each other. Leave it empty to get a generated ID.", "Chataigne");
 	host = moduleParams.addStringParameter("Host", "The MQTT Broker's host address", "127.0.0.1");
 	port = moduleParams.addIntParameter("Port", "The MQTT Broker's port", 1883, 1, 65535);
 	keepAlive = moduleParams.addIntParameter("Keep Alive", "The time to keep alive the connection, in seconds", 60, 1);
@@ -322,16 +322,59 @@ void MQTTClientModule::afterLoadJSONDataInternal()
 	if (enabled->boolValue()) startThread();
 }
 
+//MQTT makes the broker evict an existing session when a second client connects with the same client
+//id, so two Chataignes sharing one project file - a show machine and a desktop copy of the same
+//.noisette, say - kick each other off every couple of seconds for as long as both run. The id lives
+//in the project, so a shared project needs one that resolves differently per machine : "{machine}"
+//becomes the computer name, and an empty field gets a generated id.
+String MQTTClientModule::resolveClientId() const
+{
+	auto sanitize = [](const String& s)
+	{
+		String result;
+		for (int i = 0; i < s.length(); ++i)
+		{
+			const juce_wchar c = s[i];
+			if (CharacterFunctions::isLetterOrDigit(c) || c == '-' || c == '_') result << c;
+			else result << '_';
+		}
+		return result;
+	};
+
+	String id = sanitize(clientId->stringValue().trim().replace("{machine}", SystemStats::getComputerName(), true));
+
+	//mosquitto rejects a zero-length id outright, so an empty field cannot simply be passed through.
+	if (id.isEmpty()) id = "chataigne-" + sanitize(SystemStats::getComputerName()) + "-" + Uuid().toString().substring(0, 6);
+
+	//Brokers are only required to accept 23 bytes. mosquitto takes far more, but a long one has no
+	//upside and would silently differ from what the user typed if a broker did truncate it.
+	if (id.length() > 64)
+	{
+		NLOGWARNING(niceName, "Client ID \"" << id << "\" is longer than 64 characters, using its first 64");
+		id = id.substring(0, 64);
+	}
+
+	return id;
+}
+
 void MQTTClientModule::run()
 {
-	if (wait(100) || threadShouldExit()) return;
+	//Both stopClient() and Thread::stopThread() notify() this thread, and a WaitableEvent stays
+	//signalled until something consumes it : a notify aimed at a thread that had already left makes
+	//the *next* run()'s first wait() return true straight away. Treating that as "we were asked to
+	//stop" killed the client for good - changing Host, Port, Keep Alive or Client ID restarts the
+	//thread, and the restarted one left immediately and silently, so MQTT stayed dead until the app
+	//was restarted. Every notify() here comes with the exit flag set, so test the flag, not the wait.
+	wait(100);
+	if (threadShouldExit()) return;
 
 #ifdef MOSQUITTO_SUPPORTED
 	int result = MOSQ_ERR_SUCCESS;
 	{
 		GenericScopedLock mosqLock(mosquittoLock);
 
-		const std::string id = clientId->stringValue().toStdString();
+		resolvedClientId = resolveClientId();
+		const std::string id = resolvedClientId.toStdString();
 		result = reinitialise(id.c_str(), true);
 		if (result != MOSQ_ERR_SUCCESS)
 		{
@@ -349,7 +392,7 @@ void MQTTClientModule::run()
 			return;
 		}
 
-		NLOG(niceName, "Connecting to " << host->stringValue() << ":" << port->intValue() << " with id " << clientId->stringValue() << "...");
+		NLOG(niceName, "Connecting to " << host->stringValue() << ":" << port->intValue() << " with id " << resolvedClientId << "...");
 
 		if (authenticationCC.enabled->boolValue())
 		{
@@ -358,7 +401,8 @@ void MQTTClientModule::run()
 		}
 		else username_pw_set(NULL);
 
-		reconnect_delay_set(1, 10, true);
+		//No reconnect_delay_set() : that schedule belongs to loop_forever(), which this module no
+		//longer uses. The reconnect cadence below is ours.
 	}
 
 	isConnected->setValue(false);
@@ -375,44 +419,55 @@ void MQTTClientModule::run()
 		if (result == MOSQ_ERR_SUCCESS) break;
 
 		NLOGWARNING(niceName, "MQTT connection failed: " << String(mosqpp::strerror(result)) << " (" << result << "), retrying...");
-		if (wait(retryDelayMs) || threadShouldExit()) return;
+		wait(retryDelayMs); //a stale signal only shortens the wait; the flag decides whether we stop
+		if (threadShouldExit()) return;
 		retryDelayMs = jmin(retryDelayMs * 2, 10000);
 	}
 
 	if (threadShouldExit()) return;
 
-	// loop_forever reconnects automatically after recoverable network failures, but it does give up
-	// on some (a broker that closes the session because another client took our id, for instance).
-	// It used to return straight into the end of run(), leaving the module permanently dead at
-	// isConnected = false while every publish logged "Not connected" - the "stops updating until I
-	// touch a setting" failure. Retry the whole connect/loop cycle instead, with a backoff.
-	int loopRetryDelayMs = 1000;
+	// Pump the network one iteration at a time rather than calling loop_forever(). That call owns its
+	// own reconnect schedule, waits out its delay between attempts with nothing able to interrupt it,
+	// and so did not return within the 5 s stopThread() allows : JUCE then killed this thread by
+	// force, inside libmosquitto, every time a setting was changed while the broker was unreachable
+	// (reproduced 2026-09-21). It also gave up on some failures, which is what left the module dead
+	// at isConnected = false while every publish logged "Not connected". Here a stop request is seen
+	// within one timeout, and the reconnect schedule is ours.
+	int reconnectDelayMs = 1000;
+	bool lossReported = false;
+
 	while (!threadShouldExit())
 	{
-		// max_packets is documented as reserved and must be 1.
-		result = loop_forever(-1, 1);
+		// max_packets is documented as reserved and must be 1. loop() also sends the keepalive
+		// PINGREQs, and runs unlocked like loop_forever() did - libmosquitto is in threaded mode, so
+		// a publish from another thread is safe alongside it.
+		result = loop(100, 1);
 
+		if (result == MOSQ_ERR_SUCCESS)
 		{
-			GenericScopedLock mosqLock(mosquittoLock);
-			isConnected->setValue(false);
-			disconnect();
+			reconnectDelayMs = 1000; //the socket is alive, so a later loss starts its backoff over
+			lossReported = false;
+			continue;
 		}
 
 		if (threadShouldExit()) break;
 
-		if (result == MOSQ_ERR_SUCCESS)
 		{
-			// A clean return with nobody asking us to stop still means the loop is gone.
-			NLOGWARNING(niceName, "MQTT network loop ended unexpectedly, reconnecting...");
-		}
-		else
-		{
-			NLOGWARNING(niceName, "MQTT network loop stopped: " << String(mosqpp::strerror(result))
-				<< " (" << result << "), reconnecting in " << (loopRetryDelayMs / 1000.0f) << "s...");
+			GenericScopedLock mosqLock(mosquittoLock);
+			isConnected->setValue(false);
+			disconnect(); //clears the client's state even when the socket is already gone
 		}
 
-		if (wait(loopRetryDelayMs) || threadShouldExit()) break;
-		loopRetryDelayMs = jmin(loopRetryDelayMs * 2, 30000);
+		if (!lossReported)
+		{
+			NLOGWARNING(niceName, "MQTT network loop stopped: " << String(mosqpp::strerror(result))
+				<< " (" << result << "), reconnecting...");
+			lossReported = true; //every further attempt in this outage logs only if connect() fails
+		}
+
+		wait(reconnectDelayMs);
+		if (threadShouldExit()) break;
+		reconnectDelayMs = jmin(reconnectDelayMs * 2, 30000);
 
 		const std::string brokerHost = host->stringValue().toStdString();
 		{
@@ -422,8 +477,6 @@ void MQTTClientModule::run()
 
 		if (result != MOSQ_ERR_SUCCESS)
 			NLOGWARNING(niceName, "MQTT reconnect failed: " << String(mosqpp::strerror(result)) << " (" << result << ")");
-		else
-			loopRetryDelayMs = 1000; //connected again, reset the backoff
 	}
 #endif
 }
@@ -496,7 +549,7 @@ void MQTTClientModule::on_connect(int rc)
 		return;
 	}
 
-	NLOG(niceName, "Connected to " << host->stringValue() << ":" << port->intValue() << " as " << clientId->stringValue());
+	NLOG(niceName, "Connected to " << host->stringValue() << ":" << port->intValue() << " as " << resolvedClientId);
 
 	//Resubscribing walks topicsManager and creates no model objects, but the walk still races with
 	//topic add/remove on the main thread, so do it there instead of on the network thread.
@@ -663,7 +716,7 @@ void MQTTClientModule::on_log(int level, const char* str)
 void MQTTClientModule::on_error()
 {
 	NLOGERROR(niceName, "MQTT socket error while talking to " << host->stringValue() << ":" << port->intValue()
-		<< " (client id \"" << clientId->stringValue() << "\" - a second client using the same id makes the broker drop this one)");
+		<< " (client id \"" << resolvedClientId << "\" - a second client using the same id makes the broker drop this one)");
 	isConnected->setValue(false);
 }
 #endif
