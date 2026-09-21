@@ -329,5 +329,7 @@ void CVValueMap::loadJSONDataInternal(var data)
 
 InspectableEditor* CVValueMap::getEditorInternal(bool isRoot, Array<Inspectable*> inspectables)
 {
-	return new GenericControllableContainerEditor(this, isRoot, false);
+	//see the note in CVBinding::getEditorInternal : buildAtCreation false leaves an uncollapsed
+	//section drawn as open but empty until it is collapsed and expanded again
+	return new GenericControllableContainerEditor(this, isRoot);
 }

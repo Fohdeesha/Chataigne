@@ -584,5 +584,9 @@ void CVBinding::loadJSONDataInternal(var data)
 
 InspectableEditor* CVBinding::getEditorInternal(bool isRoot, Array<Inspectable*> inspectables)
 {
-	return new GenericControllableContainerEditor(this, isRoot, false);
+	//buildAtCreation must stay true (the default). With it false the constructor passes
+	//doNotRebuild to setCollapsed(), so an editor created for a section that is NOT collapsed shows
+	//the open arrow and lays out its header, but never builds its children : the Binding section
+	//came up expanded and empty, and only filled in after collapsing and re-expanding it by hand.
+	return new GenericControllableContainerEditor(this, isRoot);
 }
