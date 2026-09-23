@@ -32,9 +32,20 @@ SimpleConversionFilter::~SimpleConversionFilter()
 void SimpleConversionFilter::setupParametersInternal(int multiplexIndex, bool rangeOnly)
 {
 	var prevData;
+	var retargetData = retargetComponent->getValueData();
+	if (retargetData.isVoid() && ghostOptions.isObject()) retargetData = ghostOptions.getProperty("retarget", var());
+
 	if (autoLoadDataOnSetup) prevData = getJSONData();
 	MappingFilter::setupParametersInternal(multiplexIndex, rangeOnly);
-	if (autoLoadDataOnSetup) loadJSONData(prevData);
+	if (autoLoadDataOnSetup)
+	{
+		loadJSONData(prevData);
+
+		// Dynamic enum options do not exist when the filter is initially loaded.
+		// Restore the saved data after rebuilding the options and reloading the
+		// other parameters, otherwise EnumParameter falls back to a blank value.
+		if (!retargetData.isVoid()) retargetComponent->setValueWithData(retargetData);
+	}
 }
 
 Parameter* SimpleConversionFilter::setupSingleParameterInternal(Parameter* source, int multiplexIndex, bool rangeOnly)
@@ -572,7 +583,47 @@ var ToColorFilter::getJSONData(bool includeNonOverriden)
 {
 	var data = SimpleConversionFilter::getJSONData(includeNonOverriden);
 	if (baseColor != nullptr) data.getProperty("ghostOptions", var()).getDynamicObject()->setProperty("color", baseColor->getValue());
+
+	// Keep deferred Base Color data intact if the filter is saved before its
+	// input type has been restored and the parameter can be recreated.
+	if (baseColor == nullptr && baseColorGhostData.isObject())
+	{
+		var filterParamsData = data.getProperty("filterParams", var());
+		if (DynamicObject* filterParamsObject = filterParamsData.getDynamicObject())
+		{
+			var parametersData = filterParamsData.getProperty("parameters", var());
+			if (!parametersData.isArray()) parametersData = var(Array<var>());
+			parametersData.append(baseColorGhostData.clone());
+			filterParamsObject->setProperty("parameters", parametersData);
+		}
+	}
+
 	return data;
+}
+
+void ToColorFilter::loadJSONDataItemInternal(var data)
+{
+	// Base Color is created only after the mapping input type is known, which is
+	// later than filterParams is initially loaded. Keep its complete parameter
+	// data so its control mode, expression/reference and value can be restored.
+	if (baseColor == nullptr && baseColorGhostData.isVoid())
+	{
+		var parametersData = data.getProperty("filterParams", var()).getProperty("parameters", var());
+		if (Array<var>* parameters = parametersData.getArray())
+		{
+			for (const var& parameterData : *parameters)
+			{
+				String controlAddress = parameterData.getProperty("controlAddress", "").toString();
+				if (controlAddress.fromLastOccurrenceOf("/", false, false) == "baseColor")
+				{
+					baseColorGhostData = parameterData.clone();
+					break;
+				}
+			}
+		}
+	}
+
+	SimpleConversionFilter::loadJSONDataItemInternal(data);
 }
 
 void ToColorFilter::setupParametersInternal(int multiplexIndex, bool rangeOnly)
@@ -600,9 +651,18 @@ void ToColorFilter::setupParametersInternal(int multiplexIndex, bool rangeOnly)
 		baseColor = filterParams.addColorParameter("Base Color", "Color to use to convert", Colours::red);
 	}
 
-	if (ghostOptions.isObject() && baseColor != nullptr)
+	if (baseColor != nullptr && (ghostOptions.isObject() || baseColorGhostData.isObject()))
 	{
-		if (ghostOptions.hasProperty("color")) baseColor->setValue(ghostOptions.getDynamicObject()->getProperty("color"));
+		if (baseColorGhostData.isObject())
+		{
+			baseColor->loadJSONData(baseColorGhostData);
+			baseColorGhostData = var();
+		}
+		else if (ghostOptions.hasProperty("color"))
+		{
+			baseColor->setValue(ghostOptions.getDynamicObject()->getProperty("color"));
+		}
+
 		if (ParameterLink* pLink = filterParams.getLinkedParam(baseColor))
 		{
 			var pLinkGhostData = ghostLinkData.getProperty("baseColor", var());
@@ -654,6 +714,13 @@ MappingFilter::ProcessResult ToColorFilter::processSingleParameterInternal(Param
 		int comp = retargetComponent->getValueData();
 
 		var baseColorVal = filterParams.getLinkedValue(baseColor, multiplexIndex);
+		if (!baseColorVal.isArray())
+		{
+			baseColorVal = baseColor != nullptr ? baseColor->getValue().clone() : var();
+			if (!baseColorVal.isArray()) return UNCHANGED;
+		}
+		while (baseColorVal.size() < 4) baseColorVal.append(baseColorVal.size() == 3 ? 1.0f : 0.0f);
+
 		Colour mBaseColor = Colour::fromFloatRGBA((float)baseColorVal[0], (float)baseColorVal[1], (float)baseColorVal[2], baseColorVal.size() > 3 ? (float)baseColorVal[3] : 1.0f);
 
 		switch (comp)

@@ -76,6 +76,7 @@ void HTTPModule::sendRequest(StringRef address, RequestMethod method, ResultData
 	if (logOutgoingData->boolValue())  NLOG(niceName, "Send " + requestMethodNames[(int)method] + " Request : " + url.toString(true));
 
 	requests.add(new Request(url, method, dataType, extraHeaders));
+	notify();
 }
 
 void HTTPModule::processRequest(Request* request)
@@ -377,20 +378,11 @@ void HTTPModule::run()
 
 	while (!threadShouldExit())
 	{
-		OwnedArray<Request, CriticalSection> tmpRequests; //same lock type as requests, so swapWith matches
-		{
-			// Take ownership of what is queued instead of copying it and clearing the whole queue
-			// afterwards. processRequest() blocks for as long as the server takes to answer (up to
-			// the Timeout parameter), and every request sendRequest() appended during that window
-			// used to be destroyed by the clear() without ever being sent - measured at 54% loss
-			// (215 of 400) when sending at 50 Hz against a server answering in 30 ms, silently and
-			// with nothing logged.
-			const ScopedLock sl(requests.getLock());
-			requests.swapWith(tmpRequests);
-		}
+		OwnedArray<Request, CriticalSection> tmpRequests;
+		// Drain the queue atomically so requests added during processing remain queued.
+		requests.swapWith(tmpRequests);
 
 		for (auto& r : tmpRequests) processRequest(r);
-
 		wait(10);
 	}
 }
