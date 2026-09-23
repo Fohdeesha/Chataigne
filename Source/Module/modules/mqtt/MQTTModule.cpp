@@ -57,7 +57,8 @@ MQTTClientModule::MQTTClientModule(const String& name, bool canHaveInput, bool c
 	protocol = moduleParams.addEnumParameter("Default Protocol", "How to parse the incoming data");
 	protocol->addOption("JSON", MQTTTopic::JSON)->addOption("Raw", MQTTTopic::RAW);
 
-	clientId = moduleParams.addStringParameter("Client ID", "The client ID to use. It must be unique on the broker : when a second client connects with the same one, the broker disconnects the first. \"{machine}\" is replaced by this computer's name, so one project can be opened on several machines without them evicting each other. Leave it empty to get a generated ID.", "Chataigne");
+	clientId = moduleParams.addStringParameter("Client ID", "The client ID to use. It must be unique on the broker : when a second client connects with the same one, the broker disconnects the first. \"{machine}\" is replaced by this computer's name, so one project can be opened on several machines without them evicting each other. Leave it empty to get a generated ID.", DEFAULT_CLIENT_ID);
+	clientId->forceSaveValue = true; //an absent entry must keep meaning "saved with the old default", see loadJSONDataItemInternal
 	host = moduleParams.addStringParameter("Host", "The MQTT Broker's host address", "127.0.0.1");
 	port = moduleParams.addIntParameter("Port", "The MQTT Broker's port", 1883, 1, 65535);
 	keepAlive = moduleParams.addIntParameter("Keep Alive", "The time to keep alive the connection, in seconds", 60, 1);
@@ -313,6 +314,29 @@ void MQTTClientModule::updateTopicSubs()
 	for (auto& cc : containersToRemove) valuesCC.removeChildControllableContainer(cc);
 
 	valuesCC.queuedNotifier.addMessage(new ContainerAsyncEvent(ContainerAsyncEvent::ControllableContainerNeedsRebuild, &valuesCC));
+}
+
+void MQTTClientModule::loadJSONDataItemInternal(var data)
+{
+	//The default Client ID used to be "Chataigne", and a parameter left at its default is not written to the file,
+	//so a module saved without the entry was using "Chataigne", not today's default. Keep it : a broker that
+	//authorises by client ID must keep seeing the same one. Every save now writes the entry (forceSaveValue), so
+	//its absence only ever means an older file. Data without "params" is not a saved module (a remote ADD passes
+	//just the type), so a new module created that way keeps the new default.
+	DynamicObject* o = data.getDynamicObject();
+	if (o != nullptr && o->hasProperty("params"))
+	{
+		bool hasClientId = false;
+		var paramsData = data.getProperty("params", var()).getProperty("parameters", var());
+		for (int i = 0; i < paramsData.size() && !hasClientId; i++)
+		{
+			hasClientId = paramsData[i].getProperty("controlAddress", "").toString() == clientId->getControlAddress(&moduleParams);
+		}
+
+		if (!hasClientId) clientId->setValue(LEGACY_DEFAULT_CLIENT_ID);
+	}
+
+	Module::loadJSONDataItemInternal(data);
 }
 
 void MQTTClientModule::afterLoadJSONDataInternal()

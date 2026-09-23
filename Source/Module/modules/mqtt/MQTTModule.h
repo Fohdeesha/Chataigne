@@ -96,6 +96,12 @@ public:
 
 	void updateTopicSubs();
 
+	//New modules resolve per machine, so one project can run on several machines against one broker.
+	//Modules saved before this default existed keep the old one (see loadJSONDataItemInternal).
+	static constexpr const char* DEFAULT_CLIENT_ID = "chataigne-{machine}";
+	static constexpr const char* LEGACY_DEFAULT_CLIENT_ID = "Chataigne";
+
+	void loadJSONDataItemInternal(var data) override;
 	void afterLoadJSONDataInternal() override;
 
 	void run() override;
