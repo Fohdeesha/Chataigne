@@ -46,5 +46,9 @@
 #include "modules/mqtt/commands/MQTTCommands.cpp"
 #include "modules/mqtt/ui/MQTTModuleUI.cpp"
 
+#include "modules/openhab/OpenHABProtocol.cpp"
+#include "modules/openhab/OpenHABModule.cpp"
+#include "modules/openhab/commands/OpenHABCommand.cpp"
+
 #include "modules/posistagenet/PosiStageNetModule.cpp"
 #include "modules/posistagenet/commands/PosiStageNetCommand.cpp"

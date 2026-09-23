@@ -205,6 +205,10 @@
 #include "modules/mqtt/commands/MQTTCommands.h"
 #include "modules/mqtt/ui/MQTTModuleUI.h"
 
+#include "modules/openhab/OpenHABProtocol.h"
+#include "modules/openhab/OpenHABModule.h"
+#include "modules/openhab/commands/OpenHABCommand.h"
+
 #include "modules/posistagenet/PosiStageNetModule.h"
 #include "modules/posistagenet/commands/PosiStageNetCommand.h"
 
