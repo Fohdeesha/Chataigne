@@ -67,6 +67,7 @@ public:
 
 	bool applyingFeedback;		//true while writing the control from feedback : suppresses outbound
 	bool isLoadingBinding;
+	bool initialSyncDone;		//On Load has acted : a later endLoadFile() is not a load of this binding
 
 	bool echoPending;
 	var echoValue;				//the mapped value we last sent

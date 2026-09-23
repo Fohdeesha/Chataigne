@@ -50,6 +50,7 @@ CVBinding::CVBinding(CVVariable* owner) :
 	outValue(nullptr),
 	applyingFeedback(false),
 	isLoadingBinding(false),
+	initialSyncDone(false),
 	echoPending(false),
 	echoSentAtMS(0),
 	hasLastSent(false),
@@ -450,6 +451,7 @@ void CVBinding::doInitialSync()
 
 	sendTo->setForceDisabled(false);
 	sendToWhenFalse->setForceDisabled(false);
+	initialSyncDone = true;
 
 	if (!bindingEnabled->boolValue()) return;
 
@@ -541,6 +543,11 @@ void CVBinding::inspectableDestroyed(Inspectable* i)
 
 void CVBinding::endLoadFile()
 {
+	//On Load acts once per binding. A load clears the whole session before building the new one, so a binding that
+	//has already synced and still hears this is in a session the load left alone : a document that cannot be read
+	//ends that way (organicui returns before clear() and still ends the load), and acting again would re-send a Push
+	if (initialSyncDone) return;
+
 	updateFeedbackFromTarget();
 	rebuildOutValue();
 
