@@ -48,4 +48,6 @@ using namespace SimpleBLE;
 
 #include "OSHelpers/KeyboardMouseHooker.h"
 
+#include "Parameter/PasswordParameter.h"
+
 

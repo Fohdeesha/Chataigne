@@ -102,6 +102,7 @@ public:
 		String host;
 		int port = 8080;
 		String headers;
+		String authHint; //what a 401 means for the credentials this config sends
 	};
 
 	struct Inbound

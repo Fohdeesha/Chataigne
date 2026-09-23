@@ -79,9 +79,9 @@ public:
 		stream.close();
 	}
 
-	static String describe(const String& what, const OpenHAB::Response& r)
+	String describe(const String& what, const OpenHAB::Response& r) const
 	{
-		if (r.status == 401 || r.status == 403) return what + " : " + r.describe() + ", the server wants an API token";
+		if (r.status == 401 || r.status == 403) return what + " : " + r.describe() + ". " + config.authHint;
 		return what + " : " + r.describe();
 	}
 
@@ -361,7 +361,8 @@ public:
 				const uint32 t = Time::getMillisecondCounter();
 				if (!lastRejectionLog.contains(cmd.item) || (int)(t - lastRejectionLog[cmd.item]) > 5000)
 				{
-					NLOGWARNING(module.niceName, "openHAB rejected \"" << cmd.command << "\" for " << cmd.item << " : " << r.describe());
+					NLOGWARNING(module.niceName, "openHAB rejected \"" << cmd.command << "\" for " << cmd.item << " : " << r.describe()
+						<< (r.status == 401 || r.status == 403 ? ". " + config.authHint : String()));
 					lastRejectionLog.set(cmd.item, t);
 				}
 			}
@@ -398,11 +399,17 @@ OpenHABModule::OpenHABModule(const String& name) :
 	host = moduleParams.addStringParameter("Host", "The openHAB server's address, e.g. openhab.local or an IP address. Plain HTTP only.", "127.0.0.1");
 	host->autoTrim = true;
 	port = moduleParams.addIntParameter("Port", "openHAB's HTTP port", 8080, 1, 65535);
-	apiToken = moduleParams.addStringParameter("API Token", "An openHAB API token (profile page in the Main UI, \"Create new API token\"). Sent as a Bearer token. Needed when openHAB does not allow anonymous access.", "");
+	apiToken = new PasswordParameter("API Token", "An openHAB API token : your profile page in openHAB's Main UI, \"Create new API token\". Used instead of the username and password when set. Only needed when openHAB does not allow anonymous access, which it does by default.");
 	apiToken->autoTrim = true;
+	moduleParams.addParameter(apiToken);
 
-	username = authenticationCC.addStringParameter("Username", "openHAB user, only used when openHAB's Basic Authentication is enabled and no API token is set", "");
-	password = authenticationCC.addStringParameter("Password", "Password for that user", "");
+	//openHAB refuses a username and password unless its API Security setting "Allow Basic Authentication" is on,
+	//and it rejects the whole request rather than falling back to anonymous access, so turning this on against a
+	//default server loses the connection entirely
+	authenticationCC.enabled->description = "Log in with an openHAB username and password. openHAB only accepts them when \"Allow Basic Authentication\" is on in its Settings, API Security (shown with advanced settings), which is off by default : otherwise it refuses every request. An API token works without that setting.";
+	username = authenticationCC.addStringParameter("Username", "openHAB user name. Ignored when an API Token is set.", "");
+	password = new PasswordParameter("Password", "Password for that user. openHAB cannot read one that contains ':' over Basic authentication.");
+	authenticationCC.addParameter(password);
 	authenticationCC.enabled->setValue(false);
 	moduleParams.addChildControllableContainer(&authenticationCC);
 
@@ -473,8 +480,27 @@ OpenHABModule::Config OpenHABModule::buildConfig()
 	c.port = portOverride > 0 ? portOverride : port->intValue();
 	if (https) NLOGWARNING(niceName, "HTTPS is not supported, connecting to " << c.host << ":" << c.port << " with plain HTTP");
 
-	if (apiToken->stringValue().isNotEmpty()) c.headers = "Authorization: Bearer " + apiToken->stringValue() + "\r\n";
-	else if (authenticationCC.enabled->boolValue()) c.headers = "Authorization: Basic " + Base64::toBase64(username->stringValue() + ":" + password->stringValue()) + "\r\n";
+	const String user = username->stringValue();
+	const String pass = password->stringValue();
+
+	if (apiToken->stringValue().isNotEmpty())
+	{
+		c.headers = "Authorization: Bearer " + apiToken->stringValue() + "\r\n";
+		c.authHint = "openHAB refused the API token : check it was made on this server and has not been deleted";
+	}
+	else if (authenticationCC.enabled->boolValue() && user.isNotEmpty())
+	{
+		//openHAB splits the credentials on every ':' and then wants exactly two parts
+		if (user.containsChar(':') || pass.containsChar(':')) NLOGWARNING(niceName, "openHAB cannot read a username or password that contains ':' over Basic authentication : use an API token");
+		c.headers = "Authorization: Basic " + Base64::toBase64(user + ":" + pass) + "\r\n";
+		c.authHint = "openHAB refused the username and password. It only accepts them when \"Allow Basic Authentication\" is on in its Settings, API Security, which is off by default. An API token works without it";
+	}
+	else
+	{
+		if (authenticationCC.enabled->boolValue()) NLOGWARNING(niceName, "Basic Authentication is on but the username is empty : connecting without credentials");
+		c.authHint = "openHAB does not allow anonymous access : set an API Token";
+	}
+
 	return c;
 }
 

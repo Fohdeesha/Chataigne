@@ -32,6 +32,8 @@
 
 #include "OSHelpers/KeyboardMouseHooker.cpp"
 
+#include "Parameter/PasswordParameter.cpp"
+
 #if BLE_SUPPORT
 #include "BLE/BLEDevice.cpp"
 #include "BLE/BLEManager.cpp"
