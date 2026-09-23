@@ -240,7 +240,9 @@ void CVBinding::updateEnabledState()
 	onLoad->hideInEditor = !on;
 	startupDelay->hideInEditor = !on;
 	sendTo->hideInEditor = !on;
-	sendToWhenFalse->hideInEditor = !on;
+	//only a true/false variable ever uses it (performSend) : a number or text variable sends everything through
+	//Send To, so the list would be a box that does nothing - unless something was already put in it
+	sendToWhenFalse->hideInEditor = !on || (getControlType() != Controllable::BOOL && sendToWhenFalse->items.size() == 0);
 	sendNow->hideInEditor = !on;
 	pullFromFeedback->hideInEditor = !on;
 
