@@ -81,8 +81,14 @@ Left at 0 because the useful size depends entirely on the variable's range - try
 50 Hz matches the rate the preset interpolation thread runs at, so preset recalls pass through untouched while a sequence or a flood of OSC cannot overrun the target.\n\
 Lower it to about 20 for HTTP, which serialises one request per round trip. 0 is unlimited.", 50, 0, 500);
 
-	onLoad = addEnumParameter("On Load", "What to do once the project has finished loading.");
-	onLoad->addOption("Push to device", OL_PUSH)->addOption("Adopt from feedback", OL_ADOPT)->addOption("Do nothing", OL_NOTHING);
+	onLoad = addEnumParameter("On Load", "What to do once the project has finished loading.\n\
+Adopt from feedback : take the feedback source's current value and send nothing, so opening a project never switches a device.\n\
+Push to device : send the value saved in the project.\n\
+Do nothing : leave both sides as they are.");
+	//the first option is the default. It was "Push to device" until 2026-09-23 : a value left at its default is not
+	//written to a project, so an enabled binding always saves it (updateEnabledState), or its file would push on an
+	//older build and adopt on this one
+	onLoad->addOption("Adopt from feedback", OL_ADOPT)->addOption("Push to device", OL_PUSH)->addOption("Do nothing", OL_NOTHING);
 
 	startupDelay = addFloatParameter("Startup Delay", "How long to wait after the project loads before On Load acts, so modules have a chance to connect.", 2.f, 0, 60);
 
@@ -238,6 +244,7 @@ void CVBinding::updateEnabledState()
 	deadband->hideInEditor = !on;
 	maxSendRate->hideInEditor = !on;
 	onLoad->hideInEditor = !on;
+	onLoad->forceSaveValue = on;
 	startupDelay->hideInEditor = !on;
 	sendTo->hideInEditor = !on;
 	//only a true/false variable ever uses it (performSend) : a number or text variable sends everything through
