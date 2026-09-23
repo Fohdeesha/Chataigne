@@ -27,6 +27,7 @@ public:
 	TargetParameter* target;
 
 	WeakReference<Parameter> targetParam; //for range check
+	void setTargetParam(Parameter* p); //moves the range listener, so it is registered on exactly this parameter
 
 	EnumParameter* valueOperator;
 	EnumParameter* componentOperator;

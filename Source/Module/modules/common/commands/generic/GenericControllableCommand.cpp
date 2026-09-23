@@ -62,6 +62,13 @@ GenericControllableCommand::GenericControllableCommand(Module* _module, CommandC
 
 GenericControllableCommand::~GenericControllableCommand()
 {
+	//Unregister before anything that can return early. The interpolation manager only exists once a Set Value or
+	//Go to Value command has fired in this session, and the early return below used to skip the unregister whenever
+	//it did not : deleting such a command (with its mapping, say) left a dangling listener on the target parameter,
+	//and the next change of that parameter called into freed memory.
+	setTargetParam(nullptr);
+	if (Engine::mainEngine != nullptr) Engine::mainEngine->removeEngineListener(this);
+
 	if (Parameter::ValueInterpolator::Manager::getInstanceWithoutCreating() == nullptr) return;
 
 	if (action == GO_TO_VALUE)
@@ -78,8 +85,15 @@ GenericControllableCommand::~GenericControllableCommand()
 			}
 		}
 	}
+}
+
+void GenericControllableCommand::setTargetParam(Parameter* p)
+{
+	if (targetParam == p) return;
 
 	if (!isMultiplexed() && targetParam != nullptr && !targetParam.wasObjectDeleted()) targetParam->removeParameterListener(this);
+	targetParam = p;
+	if (!isMultiplexed() && targetParam != nullptr) targetParam->addParameterListener(this);
 }
 
 void GenericControllableCommand::updateComponentFromTarget()
@@ -131,8 +145,6 @@ void GenericControllableCommand::updateValueFromTargetAndComponent()
 
 	if (value != nullptr && !value.wasObjectDeleted())
 	{
-		if (!isMultiplexed() && targetParam != nullptr && !targetParam.wasObjectDeleted()) targetParam->removeParameterListener(this);
-
 		if (ghostValueData.isVoid())
 		{
 			ghostValueData = value->getJSONData();
@@ -172,12 +184,12 @@ void GenericControllableCommand::updateValueFromTargetAndComponent()
 			}
 		}
 
-		targetParam = cTarget;
-		if (!isMultiplexed()) targetParam->addParameterListener(this);
+		//not tied to value : a target that yields no value still has to release the previous one
+		setTargetParam(cTarget);
 	}
 	else
 	{
-		targetParam = nullptr;
+		setTargetParam(nullptr);
 	}
 
 	if (value != nullptr)
@@ -311,6 +323,7 @@ void GenericControllableCommand::parameterRangeChanged(Parameter* p)
 {
 	if (p == targetParam)
 	{
+		if (value == nullptr || value.wasObjectDeleted()) return; //a component index the target does not have
 		if (!p->hasRange()) value->clearRange();
 		else value->setRange(p->minimumValue, p->maximumValue);
 	}
