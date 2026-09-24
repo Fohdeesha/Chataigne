@@ -18,12 +18,14 @@ class AudioModule;
 class MTCSender;
 class MIDIDeviceParameter;
 class LTCAudioSender;
+class Module;
 
 class ChataigneSequence :
 	public Sequence,
 	public SequenceLayerManager::ManagerListener,
 	public ChataigneAudioLayerListener,
-	public MTCReceiver::MTCListener
+	public MTCReceiver::MTCListener,
+	public BaseManagerListener<Module> //the module manager's ; ModuleManager is not declared yet here
 {
 public:
 	ChataigneSequence();
@@ -66,6 +68,10 @@ public:
 	void itemsAdded(Array<SequenceLayer*> layers) override;
 	void itemRemoved(SequenceLayer* layer) override;
 	void itemsRemoved(Array<SequenceLayer*> layers) override;
+
+	//a module about to be removed, still whole : the LTC Sound Card is let go of here
+	void itemRemoved(Module* m) override;
+	void itemsRemoved(Array<Module*> modules) override;
 
 	void checkForNewAudioLayer(SequenceLayer* layer, bool showMenuIfNoAudioModule = true);
 	

@@ -117,6 +117,10 @@ ChataigneEngine::~ChataigneEngine()
 
 void ChataigneEngine::clearInternal()
 {
+	//A sequence's play thread runs its layers' outputs, which command states and modules : stop every one of them before
+	//any of that is cleared (the states went first, under play threads still running)
+	for (auto& s : ChataigneSequenceManager::getInstance()->items) s->stopThread(1000);
+
 	//clear
 	StateManager::getInstance()->clear();
 	ChataigneSequenceManager::getInstance()->clear();

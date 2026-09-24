@@ -93,7 +93,17 @@ void State::handleActiveChanged()
 			{
 				if (t->cdm != nullptr && t->cdm->getIsValid())
 				{
+					//a transition activates its destination right here, whose own transitions are checked right here too :
+					//A -> B -> A, both valid, recursed until the stack overflowed
+					static thread_local int activationDepth = 0;
+					if (activationDepth >= 32)
+					{
+						NLOGWARNING(niceName, "Transitions keep activating each other (a loop of valid transitions checked on activation), stopping here");
+						break;
+					}
+					++activationDepth;
 					t->triggerConsequences(true);
+					--activationDepth;
 					break;
 				}
 			}

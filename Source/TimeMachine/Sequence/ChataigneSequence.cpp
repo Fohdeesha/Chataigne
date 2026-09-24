@@ -144,6 +144,7 @@ ChataigneSequence::ChataigneSequence() :
 	cueManager->customCreateCueFunc = customCreateCueFunc;
 
 	ChataigneSequenceManager::getInstance()->snapKeysToFrames->addParameterListener(this);
+	ModuleManager::getInstance()->addBaseManagerListener(this);
 }
 
 ChataigneSequence::~ChataigneSequence()
@@ -152,6 +153,7 @@ ChataigneSequence::~ChataigneSequence()
 	{
 		ChataigneSequenceManager::getInstance()->snapKeysToFrames->removeParameterListener(this);
 	}
+	if (ModuleManager::getInstanceWithoutCreating() != nullptr) ModuleManager::getInstance()->removeBaseManagerListener(this);
 	clearItem();
 }
 
@@ -374,6 +376,18 @@ void ChataigneSequence::setupMidiSyncDevices()
 		mtcReceiver.reset(new MTCReceiver(input));
 		mtcReceiver->addMTCListener(this);
 	}
+}
+
+void ChataigneSequence::itemRemoved(Module* m)
+{
+	//The target parameter only heard of the removal from the module's base destructor, after its parameters were gone :
+	//unregistering from them then, and the LTC sender keeping the module's device manager, used freed memory
+	if (m != nullptr && m == (Module*)ltcAudioModule) setLTCAudioModule(nullptr);
+}
+
+void ChataigneSequence::itemsRemoved(Array<Module*> modules)
+{
+	for (auto& m : modules) itemRemoved(m);
 }
 
 void ChataigneSequence::setLTCAudioModule(AudioModule* am)

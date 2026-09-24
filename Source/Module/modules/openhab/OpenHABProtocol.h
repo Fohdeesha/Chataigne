@@ -70,6 +70,7 @@ namespace OpenHAB
 		juce::MemoryBlock body;
 		juce::String error; //transport failure, empty when a response was read
 		bool receivedAnyByte = false;
+		bool requestWritten = false; //the whole request went out : the server may have acted on it even if no answer came
 
 		bool succeeded() const { return error.isEmpty() && status >= 200 && status < 300; }
 		juce::String getBodyAsString() const;

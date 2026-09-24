@@ -75,8 +75,11 @@ public:
 			m.stateType = String(backoffMs / 1000.0, 0, false);
 			post(m);
 
-			//a notify() that came while streaming (Sync Items) is still signalled and would end the wait at once
+			//a notify() that came while streaming (Sync Items) is still signalled and would end the wait at once ; but the
+			//one stopThread() sends could be the one consumed here, and the thread then slept the whole backoff (up to 30 s)
+			//and was killed : check again before waiting
 			wait(0);
+			if (threadShouldExit()) break;
 			wait(backoffMs);
 			backoffMs = jmin(backoffMs * 2, 30000);
 		}
@@ -371,6 +374,13 @@ public:
 
 			if (r.error.isNotEmpty())
 			{
+				//a value is safe to send again ; a raw command that reached openHAB before the connection failed (a read
+				//timeout) may have been applied already, and INCREASE or a scene command must not happen twice
+				if (!cmd.coalesce && r.requestWritten)
+				{
+					NLOGWARNING(module.niceName, "\"" << cmd.command << "\" for " << cmd.item << " : " << r.error << ". It reached openHAB and may have been applied, not sending it again");
+					continue;
+				}
 				module.requeueCommand(cmd);
 				failures++;
 				if (msSince(lastFailureLog, Time::getMillisecondCounter()) > 5000)
@@ -409,7 +419,7 @@ public:
 OpenHABModule::OpenHABModule(const String& name) :
 	Module(name),
 	authenticationCC("Basic Authentication"),
-	applyingRemote(false),
+	applyingStructure(false),
 	startRequested(false),
 	skippedCount(0),
 	generation(0),
@@ -511,9 +521,11 @@ OpenHABModule::Config OpenHABModule::buildConfig()
 	const String user = username->stringValue();
 	const String pass = password->stringValue();
 
-	if (apiToken->stringValue().isNotEmpty())
+	//a pasted token often carries a line break : in a header it would end the header, or start another
+	const String token = apiToken->stringValue().removeCharacters("\r\n").trim();
+	if (token.isNotEmpty())
 	{
-		c.headers = "Authorization: Bearer " + apiToken->stringValue() + "\r\n";
+		c.headers = "Authorization: Bearer " + token + "\r\n";
 		c.authHint = "openHAB refused the API token : check it was made on this server and has not been deleted";
 	}
 	else if (authenticationCC.enabled->boolValue() && user.isNotEmpty())
@@ -654,7 +666,14 @@ void OpenHABModule::onControllableFeedbackUpdateInternal(ControllableContainer* 
 	}
 	else if (c == removeMissing)
 	{
-		removeMissingItems();
+		//a trigger runs its listeners on the thread that fired it (a sequence's play thread, a script) : removing values
+		//deletes parameters, which only the message thread may do
+		if (MessageManager::getInstance()->isThisTheMessageThread()) removeMissingItems();
+		else
+		{
+			WeakReference<Inspectable> self(this);
+			MessageManager::callAsync([self]() { if (auto* m = dynamic_cast<OpenHABModule*>(self.get())) m->removeMissingItems(); });
+		}
 	}
 	else if (c == maxCommandRate)
 	{
@@ -1012,7 +1031,7 @@ void OpenHABModule::applyStructure(const var& list)
 	const Array<var>* dtos = list.getArray();
 	if (dtos == nullptr) return;
 
-	const ScopedValueSetter<bool> svs(applyingRemote, true);
+	const ScopedValueSetter<bool> svs(applyingStructure, true);
 	ValuesBatch batch(*this);
 
 	OpenHAB::ItemFilter filter;
@@ -1165,8 +1184,12 @@ void OpenHABModule::applyRemote(ItemInfo& info)
 {
 	if (!info.hasRemote || OpenHAB::isUndefinedState(info.remoteType, info.remoteValue)) return;
 
-	const ScopedValueSetter<bool> svs(applyingRemote, true);
+	//only this value is an echo : a mapping that sets another openHAB value in reaction to this one must still send it
+	//(the flag used to be module-wide, and such a command was silently never sent)
+	Parameter* p = info.param.get();
+	if (p != nullptr) applyingRemoteParams.add(p);
 	applyStateToParameter(info, info.remoteType, info.remoteValue);
+	if (p != nullptr) applyingRemoteParams.removeFirstMatchingValue(p);
 	info.believed = info.remoteValue;
 }
 
@@ -1262,7 +1285,7 @@ void OpenHABModule::applyStateToParameter(ItemInfo& info, const String& stateTyp
 
 void OpenHABModule::valueChanged(Parameter* p)
 {
-	if (applyingRemote) return;
+	if (applyingStructure || applyingRemoteParams.contains(p)) return;
 	if (isCurrentlyLoadingData || valuesCC.isCurrentlyLoadingData) return;
 	if (Engine::mainEngine == nullptr || Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing) return;
 	if (!enabled->boolValue() || !sendCommands->boolValue()) return;

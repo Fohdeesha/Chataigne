@@ -85,6 +85,9 @@ GenericControllableCommand::~GenericControllableCommand()
 				}
 			}
 		}
+
+		//a fade this command started on a target it no longer has still uses its curve, which dies with it
+		if (automation != nullptr) Parameter::ValueInterpolator::Manager::getInstance()->removeInterpolationsUsing(automation.get());
 	}
 }
 
@@ -448,7 +451,9 @@ void GenericControllableCommand::triggerInternal(int multiplexIndex)
 
 				case INVERSE:
 					if (p->type == Parameter::BOOL)  p->setValue(!p->boolValue());
-					else targetValue = 1 - p->floatValue() / ((float)p->maximumValue - (float)p->minimumValue);
+					//mirrored in the range : 30 on 0-100 is 70 (this computed 1 - v / (max - min) = 0.7) ; without a range, negated
+					else if (p->hasRange()) targetValue = (float)p->minimumValue + (float)p->maximumValue - p->floatValue();
+					else targetValue = -p->floatValue();
 					break;
 
 				case ADD:

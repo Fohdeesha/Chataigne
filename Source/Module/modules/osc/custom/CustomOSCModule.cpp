@@ -325,6 +325,20 @@ Array<WeakReference<Controllable>> CustomOSCModule::getMatchingControllables(con
 	GenericScopedLock lock(controllableAddressMap.getLock());
 
 	Array<WeakReference<Controllable>> matchCont;
+
+	//Without wildcards a pattern matches only its own address : one lookup, instead of parsing every value's address for
+	//every message (the robot's feedback, thousands of messages a second, each walked the whole map)
+	if (!address.containsWildcards())
+	{
+		const String key = address.toString();
+		if (controllableAddressMap.contains(key))
+		{
+			WeakReference<Controllable> w = controllableAddressMap[key];
+			if (!w.wasObjectDeleted()) matchCont.add(w);
+		}
+		return matchCont;
+	}
+
 	HashMap<String, WeakReference<Controllable>, DefaultHashFunctions, CriticalSection>::Iterator it(controllableAddressMap);
 	while (it.next())
 	{

@@ -104,9 +104,11 @@ void CommandTemplate::generateParametersFromDefinition(CommandDefinition * def)
 
 BaseCommand * CommandTemplate::createCommand(Module * m, CommandContext context, var params, Multiplex * multiplex)
 {
-	//HERE must find a solution to create the different commands
+	//a template whose source command no longer exists (the module changed) : no command, the handler shows it as
+	//not found, instead of every load of the project crashing on it
+	if (sourceDef == nullptr) return nullptr;
 	BaseCommand * b = sourceDef->create(context, multiplex);
-	b->linkToTemplate(this);
+	if (b != nullptr) b->linkToTemplate(this);
 	return b;
 }
 
@@ -149,7 +151,7 @@ void CommandTemplate::onContainerTriggerTriggered(Trigger * t)
 		if (module != nullptr)
 		{
 			std::unique_ptr<BaseCommand> c(createCommand(module, CommandContext::ACTION, var()));
-			c->trigger();
+			if (c != nullptr) c->trigger();
 		}
 	}
 }

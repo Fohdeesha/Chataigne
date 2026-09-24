@@ -623,6 +623,7 @@ namespace OpenHAB
 			if (reused && retryOnStaleConnection) return request(method, target, body, contentType, timeoutMs, false);
 			return r;
 		}
+		r.requestWritten = true;
 
 		if (!readHead(r, deadline))
 		{

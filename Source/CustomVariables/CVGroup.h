@@ -59,6 +59,12 @@ public:
 
 	CriticalSection interpolationLock;
 
+	//Built on the message thread before the interpolation thread starts (a preset copy links itself to every variable),
+	//used by that thread, replaced only once it has stopped
+	std::unique_ptr<CVPreset> interpolationTarget;
+	std::unique_ptr<Automation> interpolationCurve;
+	Array<var> interpolationSource;
+
 	void addItemFromParameter(Parameter* source, bool linkAsMaster = true);
 	void addItemsFromGroup(CVGroup* source);
 

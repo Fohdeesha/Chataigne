@@ -98,22 +98,30 @@ var ParameterLink::getLinkedValue(int multiplexIndex)
 
 	case MAPPING_INPUT:
 	{
-		if (!isPositiveAndBelow(multiplexIndex, mappingValues.size())) return parameter->getValue();
-		const var& mappingValue = mappingValues.getReference(multiplexIndex);
+		var mappingValue;
+		{
+			const ScopedLock lock(mappingValues.getLock());
+			if (!isPositiveAndBelow(multiplexIndex, mappingValues.size())) return parameter->getValue();
+			mappingValue = mappingValues.getReference(multiplexIndex); //a counted copy, taken under the lock
+		}
 
+		//A link to a mapping value the mapping does not have (its outputs changed) used to give 0 : a robot OSC argument
+		//became 0. Keep the argument's own value for what is missing instead.
 		var val;
 		if (parameter->isComplex())
 		{
+			var own = parameter->getValue();
 			for (int i = 0; i < parameter->value.size(); i++)
 			{
 				const int sourceIndex = mappingValueIndex + i;
 				if (isPositiveAndBelow(sourceIndex, mappingValue.size())) val.append(mappingValue[sourceIndex]);
-				else val.append(0); //default
+				else val.append(i < own.size() ? own[i] : var(0));
 			}
 		}
 		else
 		{
 			if (isPositiveAndBelow(mappingValueIndex, mappingValue.size())) val = mappingValue[mappingValueIndex];
+			else return parameter->getValue();
 		}
 
 		return parameter->getCroppedValue(val);
@@ -281,8 +289,12 @@ String ParameterLink::getReplacementString(int multiplexIndex)
 	replacementHasMappingInputToken = false;
 	if (parameter->type != parameter->STRING) return parameter->stringValue();
 
-	std::string s = parameter->stringValue().toStdString();
-	std::regex source_regex("\\{(\\w+:\\w+|index0?)\\}");
+	//a Custom OSC address is evaluated for every frame a layer plays : no token, no regex (and the regex is built once)
+	const String sourceString = parameter->stringValue();
+	if (!sourceString.containsChar('{')) return sourceString;
+
+	std::string s = sourceString.toStdString();
+	static const std::regex source_regex("\\{(\\w+:\\w+|index0?)\\}");
 
 	auto source_begin = std::sregex_iterator(s.begin(), s.end(), source_regex);
 	auto source_end = std::sregex_iterator();
@@ -313,7 +325,8 @@ String ParameterLink::getReplacementString(int multiplexIndex)
 					{
 						if (BaseMultiplexList* curList = multiplex->listManager.getItemWithName(dotSplit[1]))
 						{
-							if (Parameter* lp = dynamic_cast<Parameter*>(curList->list[multiplexIndex]))
+							Controllable* lc = curList->list[multiplexIndex];
+							if (Parameter* lp = dynamic_cast<Parameter*>(lc))
 							{
 								if (lp->type == Controllable::TARGET)
 								{
@@ -330,9 +343,9 @@ String ParameterLink::getReplacementString(int multiplexIndex)
 									result += lp->stringValue();
 								}
 							}
-							else
+							else if (lc != nullptr)
 							{
-								result += lp->shortName; // show shortName for triggers, might be useful
+								result += lc->shortName; // show shortName for triggers, might be useful (lp is null here : this dereferenced it)
 							}
 						}
 					}

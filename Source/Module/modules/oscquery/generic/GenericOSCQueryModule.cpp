@@ -386,6 +386,14 @@ void GenericOSCQueryModule::onControllableFeedbackUpdateInternal(ControllableCon
 
 void GenericOSCQueryModule::connectionOpened()
 {
+	//the websocket's thread : updateAllListens() walks the values and sends
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		WeakReference<Inspectable> self(this);
+		MessageManager::callAsync([self]() { if (auto* m = dynamic_cast<GenericOSCQueryModule*>(self.get())) m->connectionOpened(); });
+		return;
+	}
+
 	NLOG(niceName, "Websocket connection is opened, let's get bi, baby !");
 	isConnected->setValue(true);
 	clearWarning("sync");
@@ -408,10 +416,20 @@ void GenericOSCQueryModule::dataReceived(const MemoryBlock& data)
 {
 	if (!enabled->boolValue()) return;
 
-	OSCPacketParser parser(data.getData(), (int)data.getSize());
-	OSCMessage m = parser.readMessage();
+	//parsed on the websocket's thread (a malformed packet throws an OSCException, which is not a std::exception), handled
+	//on the message thread : finding the value walks the tree the message thread edits
+	try
+	{
+		OSCPacketParser parser(data.getData(), (int)data.getSize());
+		OSCMessage m = parser.readMessage();
 
-	processOSCMessage(m);
+		WeakReference<Inspectable> self(this);
+		MessageManager::callAsync([self, m]() { if (auto* mod = dynamic_cast<GenericOSCQueryModule*>(self.get())) mod->processOSCMessage(m); });
+	}
+	catch (const OSCException& e)
+	{
+		NLOGWARNING(niceName, "Malformed OSC packet received : " << e.description);
+	}
 }
 
 void GenericOSCQueryModule::processOSCMessage(const OSCMessage& m)
@@ -612,13 +630,16 @@ void GenericOSCQueryModule::requestStructure()
 		{
 			//if (logIncomingData->boolValue()) NLOG(niceName, "Received structure :\n" << JSON::toString(data));
 
-			MessageManager::callAsync([this, data]()
+			WeakReference<Inspectable> self(this); //removed, or a project reloaded, before this runs
+			MessageManager::callAsync([self, data]()
 				{
-					updateTreeFromData(data);
+					GenericOSCQueryModule* m = dynamic_cast<GenericOSCQueryModule*>(self.get());
+					if (m == nullptr) return;
+					m->updateTreeFromData(data);
 
 					Array<var> args;
 					args.add(data);
-					scriptManager->callFunctionOnAllItems(dataStructureEventId, args); });
+					m->scriptManager->callFunctionOnAllItems(m->dataStructureEventId, args); });
 		}
 	}
 	else

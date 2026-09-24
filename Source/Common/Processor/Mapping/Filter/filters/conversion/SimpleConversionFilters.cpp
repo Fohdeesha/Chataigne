@@ -388,11 +388,13 @@ var ToIntFilter::convertValue(Parameter* source, var sourceValue, int multiplexI
 	}
 	else
 	{
+		//the value handed in (a point's or a colour's extracted component) : source->floatValue() of a point is 0
+		const float v = sourceValue.isString() ? sourceValue.toString().getFloatValue() : (float)sourceValue;
 		switch (m)
 		{
-		case ROUND: return roundf(source->floatValue());
-		case FLOOR: return floorf(source->floatValue());
-		case CEIL:  return ceilf(source->floatValue());
+		case ROUND: return roundf(v);
+		case FLOOR: return floorf(v);
+		case CEIL:  return ceilf(v);
 		}
 
 	}

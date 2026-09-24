@@ -173,17 +173,23 @@ Array<Parameter*> MappingFilterManager::getLastFilteredParameters(int multiplexI
 	//else return multiplexInputSourceMap[multiplexIndex];
 }
 
+//The rebuild takes the mapping's lock : never ask for it while holding filterLock, the order process() takes them in is
+//mappingLock then filterLock (a continuous mapping's thread used to block on them the other way round : a hang)
 void MappingFilterManager::addItemInternal(MappingFilter* f, var)
 {
-	ScopedLock lock(filterLock); //avoid removing while serving
+	{
+		ScopedLock lock(filterLock); //avoid removing while serving
+		f->addMappingFilterListener(this);
+	}
 	notifyNeedsRebuild();
-	f->addMappingFilterListener(this);
 }
 
 void MappingFilterManager::removeItemInternal(MappingFilter* f)
 {
-	ScopedLock lock(filterLock); //avoid removing while serving
-	f->removeMappingFilterListener(this);
+	{
+		ScopedLock lock(filterLock); //avoid removing while serving
+		f->removeMappingFilterListener(this);
+	}
 	notifyNeedsRebuild();
 }
 

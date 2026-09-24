@@ -171,24 +171,55 @@ void CVGroup::lerpPresets(Array<var> sourceValues, CVPreset* endPreset, float we
 
 void CVGroup::goToPreset(CVPreset* p, float time, Automation* curve)
 {
+	//a Go to Preset on a mapping layer runs on the sequence's play thread : what follows builds and links objects
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		WeakReference<Inspectable> self(this), presetRef(p), curveRef(curve);
+		MessageManager::callAsync([self, presetRef, curveRef, time]()
+			{
+				CVGroup* g = dynamic_cast<CVGroup*>(self.get());
+				CVPreset* cp = dynamic_cast<CVPreset*>(presetRef.get());
+				if (g != nullptr && cp != nullptr) g->goToPreset(cp, time, dynamic_cast<Automation*>(curveRef.get()));
+			});
+		return;
+	}
+
 	if (targetPreset == p) return;
+
+	//stopped outside the lock : the thread takes it as it starts, and waiting for it while holding it stalled the whole
+	//second of the timeout, after which it was killed
+	stopThread(1000);
 
 	GenericScopedLock lock(interpolationLock);
 
 	if (time == 0)
 	{
-		stopThread(1000);
+		targetPreset = nullptr;
 		setValuesToPreset(p);
 		return;
 	}
-
-	stopThread(1000);
 
 	targetPreset = p;
 	interpolationAutomation = curve;
 	automationRef = curve;
 
 	interpolationTime = time;
+
+	//everything the thread uses, built here, on the message thread
+	interpolationSource.clear();
+	for (auto& v : values.items) interpolationSource.add(((Parameter*)v->controllable)->value);
+
+	interpolationTarget.reset(new CVPreset(this, true));
+	interpolationTarget->loadJSONData(p->getJSONData());
+	for (auto& v : interpolationTarget->values.manager->items)
+	{
+		if (Parameter* tp = dynamic_cast<Parameter*>(v->controllable)) tp->isOverriden = true; //force use
+	}
+
+	interpolationCurve.reset(new Automation());
+	interpolationCurve->isSelectable = false;
+	interpolationCurve->hideInEditor = true;
+	if (curve != nullptr) interpolationCurve->loadJSONData(curve->getJSONData());
 
 	startThread();
 }
@@ -386,42 +417,31 @@ void CVGroup::loadJSONDataInternal(var data)
 
 void CVGroup::run()
 {
-	if (targetPreset == nullptr || interpolationTime <= 0) return;
-
-
-	interpolationLock.enter();
+	CVPreset* p2 = nullptr;
+	Automation* a = nullptr;
 	Array<var> sourceValues;
-	for (auto& v : values.items) sourceValues.add(((Parameter*)v->controllable)->value);
-
-
-	CVPreset p2(this, true);
-	p2.loadJSONData(targetPreset->getJSONData());
-	for (auto& v : p2.values.manager->items)
+	double duration = 0;
 	{
-		if (Parameter* p = dynamic_cast<Parameter*>(v->controllable)) p->isOverriden = true; //force use
+		GenericScopedLock lock(interpolationLock);
+		if (targetPreset == nullptr || interpolationTime <= 0 || interpolationTarget == nullptr || interpolationCurve == nullptr) return;
+		p2 = interpolationTarget.get();
+		a = interpolationCurve.get();
+		sourceValues = interpolationSource;
+		duration = interpolationTime;
 	}
-
-
-	Automation a;
-	a.isSelectable = false;
-	a.hideInEditor = true;
-	if (interpolationAutomation != nullptr && !automationRef.wasObjectDeleted()) a.loadJSONData(interpolationAutomation->getJSONData());
 
 	interpolationProgress->setValue(0);
 
-	interpolationLock.exit();
-
-
-	double timeAtStart = Time::getMillisecondCounter() / 1000.0;
+	const double timeAtStart = Time::getMillisecondCounterHiRes() / 1000.0;
 	while (!threadShouldExit())
 	{
-		double curTime = Time::getMillisecondCounter() / 1000.0;
-		double rel = jlimit<double>(0., 1., (curTime - timeAtStart) / interpolationTime);
+		double curTime = Time::getMillisecondCounterHiRes() / 1000.0;
+		double rel = jlimit<double>(0., 1., (curTime - timeAtStart) / duration);
 
 		interpolationProgress->setValue(rel);
 
-		float weight = a.getValueAtPosition(rel);
-		lerpPresets(sourceValues, &p2, weight);
+		float weight = a->getValueAtPosition(rel);
+		lerpPresets(sourceValues, p2, weight);
 
 		if (rel == 1) break;
 

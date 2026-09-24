@@ -68,7 +68,8 @@ void MIDIDeviceParameter::setOutputDevice(MIDIOutputDevice* o)
 void MIDIDeviceParameter::midiDeviceInAdded(MIDIInputDevice* i)
 {
 	//DBG("Device In added " << i->name << " / " << ghostDeviceIn);
-	if (inputDevice == nullptr && i->id == ghostDeviceIn)
+	//by ID, or by name when it came back under another one (plugged into another USB port), as a project load does
+	if (inputDevice == nullptr && (i->id == ghostDeviceIn || (ghostDeviceNameIn.isNotEmpty() && i->name == ghostDeviceNameIn)))
 	{
 		setInputDevice(i);
 	}
@@ -76,7 +77,7 @@ void MIDIDeviceParameter::midiDeviceInAdded(MIDIInputDevice* i)
 
 void MIDIDeviceParameter::midiDeviceOutAdded(MIDIOutputDevice* o)
 {
-	if (outputDevice == nullptr && o->id == ghostDeviceOut)
+	if (outputDevice == nullptr && (o->id == ghostDeviceOut || (ghostDeviceNameOut.isNotEmpty() && o->name == ghostDeviceNameOut)))
 	{
 		setOutputDevice(o);
 	}

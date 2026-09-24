@@ -92,7 +92,8 @@ public:
 	Array<WeakReference<Parameter>> batchCreated;
 	bool batchStructureChanged = false;
 
-	bool applyingRemote;
+	bool applyingStructure; //building values from the item list : nothing is sent
+	Array<Parameter*> applyingRemoteParams; //values being set from openHAB's state : only these are not sent back
 	bool startRequested;
 	String serverVersion;
 	int skippedCount;

@@ -21,6 +21,10 @@ public:
 	~PasswordParameter() override {}
 
 	ControllableUI* createDefaultUI(Array<Controllable*> controllables = {}) override;
+
+	//a direct OSCQuery GET of the address answered the plain value (the listing already left it out). It stays in the
+	//project file, and so in the remote control's /sessionFile, like any string.
+	var getRemoteControlValue() override { return stringValue().isEmpty() ? String() : String("********"); }
 };
 
 class PasswordParameterUI :

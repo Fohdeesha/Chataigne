@@ -42,7 +42,9 @@ public:
     String presetParamName;
     bool fullPresetSelectMode;
 
-    Array<var> mappingValues;
+    //written every frame by a sequence's play thread, read by the message thread (the Inspector's link label, a trigger)
+    //: copy an element under the lock, never hold a reference into it
+    Array<var, CriticalSection> mappingValues;
     StringArray inputValueNames; //this is also reference to how many mapping inputs are available
 
     bool replacementHasMappingInputToken;
