@@ -66,6 +66,7 @@ public:
 	WeakReference<Parameter> feedbackParam;
 
 	bool applyingFeedback;		//true while writing the control from feedback : suppresses outbound
+	bool handlingFeedback;		//re-entry guard : a feedback source that follows the control itself would recurse
 	bool isLoadingBinding;
 	bool initialSyncDone;		//On Load has acted : a later endLoadFile() is not a load of this binding
 
@@ -85,6 +86,8 @@ public:
 	Controllable::Type getControlType() const;
 
 	void setFeedbackParam(Parameter* p);
+	bool feedbackFollowsControl(Parameter* p) const;
+	static var readFeedbackValue(Parameter* p);
 	void updateFeedbackFromTarget();
 	void rebuildOutValue();
 	void updateEnabledState();
@@ -96,6 +99,8 @@ public:
 	//engine
 	void handleFeedbackValue(const var& deviceValue);
 	void requestSend(const var& controlValue, bool bypassDeadband);
+	void sendNowInternal();
+	void pullFromFeedbackInternal();
 	void performSend(const var& controlValue);
 	void doInitialSync();
 

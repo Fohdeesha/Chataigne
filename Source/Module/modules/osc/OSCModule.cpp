@@ -290,6 +290,9 @@ void OSCModule::sendOSC(const OSCMessage& msg, String ip, int port)
 	}
 	else
 	{
+		//a layer can send from its sequence's play thread while an output is added or removed (or undone) on the message
+		//thread : hold the list for the whole loop. Removing unlinks under this lock and deletes after it.
+		const ScopedLock sl(outputManager->items.getLock());
 		for (auto& o : outputManager->items) o->sendOSC(msg);
 	}
 }
@@ -624,10 +627,7 @@ void OSCModule::oscMessageReceived(const OSCMessage& message)
 void OSCModule::oscBundleReceived(const OSCBundle& bundle)
 {
 	if (!enabled->boolValue()) return;
-	for (auto& m : bundle)
-	{
-		processMessage(m.getMessage());
-	}
+	OSCHelpers::forEachMessageInBundle(bundle, [this](const OSCMessage& m) { processMessage(m); });
 }
 
 void OSCModule::run()
@@ -694,6 +694,12 @@ OSCOutput::OSCOutput() :
 OSCOutput::~OSCOutput()
 {
 	stopThread(1000);
+
+	//members die in reverse order of declaration, which frees the socket before the feedback receiver whose thread reads it
+	if (receiver != nullptr) receiver->disconnect();
+	receiver.reset();
+	sender.disconnect();
+	socket.reset();
 }
 
 void OSCOutput::setModule(OSCModule* m)
@@ -748,10 +754,11 @@ void OSCOutput::setupSender()
 
 	senderIsConnected = false;
 	sender.disconnect();
-	socket.reset();
 
+	//the feedback receiver's thread reads from this socket : stop it before the socket goes
 	if (receiver != nullptr) receiver->disconnect();
 	receiver.reset();
+	socket.reset();
 
 	if (!enabled->boolValue() || forceDisabled || Engine::mainEngine->isClearing) return;
 

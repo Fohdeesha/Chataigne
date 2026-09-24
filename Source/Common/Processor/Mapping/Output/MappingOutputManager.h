@@ -20,6 +20,9 @@ public:
 	~MappingOutputManager();
 
 	bool forceDisabled;
+	//When true (a Mapping), editing an output's command re-sends the current value to it. A Custom Variable binding turns
+	//this off : its value can be older than the device's state (feedback never updates it), and an edit must not switch a device.
+	bool sendOnCommandChange = true;
 
 	Array<Array<WeakReference<Parameter>>> outParams;
 	Array<var> prevMergedValue;

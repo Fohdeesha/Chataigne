@@ -14,7 +14,13 @@ namespace OpenHABModuleConstants
 	const char* eventTopics = "openhab/items/*/stateupdated,openhab/items/*/statechanged,openhab/items/*/added,openhab/items/*/removed,openhab/items/*/updated";
 	const int commandExpiryMs = 5000;
 	const int maxQueuedCommands = 10000;
+	const uint32 lastSentPruneMs = 60000;
 }
+
+//Milliseconds from 'then' to 'now' on Time::getMillisecondCounter(), which wraps every 49.7 days. The unsigned
+//difference is right across the wrap; cast to int it turns negative once 24.9 days have passed, and a machine that
+//stays up for months gets there.
+static uint32 msSince(uint32 then, uint32 now) { return now - then; }
 
 //==============================================================================
 // Event thread : discovery, the event stream and state snapshots. Posts what it learns, never touches the model.
@@ -223,14 +229,14 @@ public:
 			}
 
 			//openHAB sends an alive event every 10 s, so silence means the connection is dead
-			if ((int)(now - lastData) > 30000)
+			if (msSince(lastData, now) > 30000)
 			{
 				failure = "no data from the event stream for 30 s";
 				break;
 			}
 
 			const bool resync = module.resyncRequested.exchange(false);
-			if (resync || (structureDirtyAt != 0 && (int)(now - structureDirtyAt) > 500))
+			if (resync || (structureDirtyAt != 0 && msSince(structureDirtyAt, now) > 500))
 			{
 				structureDirtyAt = 0;
 				if (!fetchStructure(failure) || !fetchStates(failure)) break;
@@ -312,7 +318,8 @@ public:
 		HashMap<String, uint32> lastSent;
 		HashMap<String, uint32> lastRejectionLog;
 		int failures = 0;
-		uint32 lastFailureLog = 0;
+		uint32 lastFailureLog = Time::getMillisecondCounter() - 5001; //the first failure is logged at once
+		uint32 lastPrune = Time::getMillisecondCounter();
 		int unreportedExpired = 0;
 
 		while (!threadShouldExit())
@@ -324,11 +331,32 @@ public:
 
 			const uint32 now = Time::getMillisecondCounter();
 			unreportedExpired += expired;
-			if (unreportedExpired > 0 && (int)(now - lastFailureLog) > 5000)
+			if (unreportedExpired > 0 && msSince(lastFailureLog, now) > 5000)
 			{
 				NLOGWARNING(module.niceName, "Dropped " << unreportedExpired << " command(s) that could not be delivered within " << OpenHABModuleConstants::commandExpiryMs / 1000 << " s");
 				unreportedExpired = 0;
 				lastFailureLog = now;
+			}
+
+			//an entry older than the rate interval no longer holds anything back : drop it, so the map stays small and
+			//no entry lives long enough to meet the counter's wrap
+			if (msSince(lastPrune, now) > OpenHABModuleConstants::lastSentPruneMs)
+			{
+				lastPrune = now;
+				StringArray stale;
+				for (HashMap<String, uint32>::Iterator it(lastSent); it.next();)
+				{
+					if (msSince(it.getValue(), now) > OpenHABModuleConstants::lastSentPruneMs) stale.add(it.getKey());
+				}
+				for (HashMap<String, uint32>::Iterator it(lastRejectionLog); it.next();)
+				{
+					if (msSince(it.getValue(), now) > OpenHABModuleConstants::lastSentPruneMs) stale.add(it.getKey());
+				}
+				for (auto& k : stale)
+				{
+					if (lastSent.contains(k) && msSince(lastSent[k], now) > OpenHABModuleConstants::lastSentPruneMs) lastSent.remove(k);
+					if (lastRejectionLog.contains(k) && msSince(lastRejectionLog[k], now) > OpenHABModuleConstants::lastSentPruneMs) lastRejectionLog.remove(k);
+				}
 			}
 
 			if (!have)
@@ -345,7 +373,7 @@ public:
 			{
 				module.requeueCommand(cmd);
 				failures++;
-				if ((int)(Time::getMillisecondCounter() - lastFailureLog) > 5000)
+				if (msSince(lastFailureLog, Time::getMillisecondCounter()) > 5000)
 				{
 					NLOGWARNING(module.niceName, "Could not send \"" << cmd.command << "\" to " << cmd.item << " : " << r.error << ", retrying");
 					lastFailureLog = Time::getMillisecondCounter();
@@ -359,7 +387,7 @@ public:
 			if (!r.succeeded())
 			{
 				const uint32 t = Time::getMillisecondCounter();
-				if (!lastRejectionLog.contains(cmd.item) || (int)(t - lastRejectionLog[cmd.item]) > 5000)
+				if (!lastRejectionLog.contains(cmd.item) || msSince(lastRejectionLog[cmd.item], t) > 5000)
 				{
 					NLOGWARNING(module.niceName, "openHAB rejected \"" << cmd.command << "\" for " << cmd.item << " : " << r.describe()
 						<< (r.status == 401 || r.status == 403 ? ". " + config.authHint : String()));
@@ -1266,7 +1294,7 @@ void OpenHABModule::valueChanged(Parameter* p)
 bool OpenHABModule::warnOnce(ItemInfo& info)
 {
 	const uint32 now = Time::getMillisecondCounter();
-	if (info.lastWarning != 0 && (int)(now - info.lastWarning) < 5000) return false;
+	if (info.lastWarning != 0 && msSince(info.lastWarning, now) < 5000) return false;
 	info.lastWarning = now | 1;
 	return true;
 }
@@ -1440,7 +1468,7 @@ bool OpenHABModule::takeNextCommand(int gen, PendingCommand& out, int& waitMs, H
 	{
 		const PendingCommand& c = commandQueue.getReference(i);
 		if (c.generation < gen) commandQueue.remove(i); //meant for a connection that was replaced
-		else if (c.generation == gen && (int)(now - c.queuedAt) > OpenHABModuleConstants::commandExpiryMs)
+		else if (c.generation == gen && msSince(c.queuedAt, now) > (uint32)OpenHABModuleConstants::commandExpiryMs)
 		{
 			commandQueue.remove(i);
 			expired++;
@@ -1454,8 +1482,9 @@ bool OpenHABModule::takeNextCommand(int gen, PendingCommand& out, int& waitMs, H
 		const PendingCommand& c = commandQueue.getReference(i);
 		if (c.generation != gen || blocked.contains(c.item)) continue;
 
-		const int until = lastSent.contains(c.item) ? (int)(lastSent[c.item] + minInterval - now) : 0;
-		if (until <= 0)
+		//blocked only while less than the interval has passed since the item's last send
+		const uint32 since = lastSent.contains(c.item) ? msSince(lastSent[c.item], now) : minInterval;
+		if (since >= minInterval)
 		{
 			out = c;
 			commandQueue.remove(i);
@@ -1463,7 +1492,7 @@ bool OpenHABModule::takeNextCommand(int gen, PendingCommand& out, int& waitMs, H
 		}
 
 		blocked.add(c.item);
-		waitMs = jmin(waitMs, until);
+		waitMs = jmin(waitMs, (int)(minInterval - since));
 	}
 
 	return false;
@@ -1493,10 +1522,10 @@ void OpenHABModule::timerCallback()
 	for (int i = reconcileList.size() - 1; i >= 0; --i)
 	{
 		ItemInfo* info = reconcileList[i];
-		const int sinceLocal = (int)(now - info->lastLocalChange);
-		const int sinceRemote = info->lastRemoteWhilePending != 0 ? (int)(now - info->lastRemoteWhilePending) : sinceLocal;
-		const bool quiet = sinceLocal >= window && sinceRemote >= window;
-		if ((!quiet && sinceLocal < maxHold) || hasQueuedCommand(info->name)) continue;
+		const uint32 sinceLocal = msSince(info->lastLocalChange, now);
+		const uint32 sinceRemote = info->lastRemoteWhilePending != 0 ? msSince(info->lastRemoteWhilePending, now) : sinceLocal;
+		const bool quiet = sinceLocal >= (uint32)window && sinceRemote >= (uint32)window;
+		if ((!quiet && sinceLocal < (uint32)maxHold) || hasQueuedCommand(info->name)) continue;
 
 		reconcileList.remove(i);
 		info->reconcilePending = false;

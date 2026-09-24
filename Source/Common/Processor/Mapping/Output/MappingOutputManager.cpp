@@ -117,6 +117,7 @@ void MappingOutputManager::removeItemInternal(MappingOutput * o)
 void MappingOutputManager::commandChanged(BaseCommandHandler * h)
 {
 	for (auto& o : items) o->updateCommandOutParams();
+	if (!sendOnCommandChange) return;
 	for (int i = 0; i < getMultiplexCount(); i++)
 	{
 		updateOutputValue(dynamic_cast<MappingOutput *>(h), i);
@@ -126,6 +127,7 @@ void MappingOutputManager::commandChanged(BaseCommandHandler * h)
 void MappingOutputManager::commandUpdated(BaseCommandHandler * h)
 {
 	for (auto& o : items) o->updateCommandOutParams();
+	if (!sendOnCommandChange) return;
 	for (int i = 0; i < getMultiplexCount(); i++) updateOutputValue(dynamic_cast<MappingOutput *>(h), i);
 }
 

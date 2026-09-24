@@ -150,12 +150,12 @@ var CVValueMap::coerce(const String& s, Controllable::Type t, bool* ok)
 
 	case Controllable::INT:
 		if (cvBoolish(s, b)) return b ? 1 : 0;
-		if (cvIsNumeric(s, d)) return (int)d;
+		if (cvIsNumeric(s, d) && std::isfinite(d)) return roundToInt(d); //49.804 from 8-bit DMX is 50, not 49
 		break;
 
 	case Controllable::FLOAT:
 		if (cvBoolish(s, b)) return b ? 1.f : 0.f;
-		if (cvIsNumeric(s, d)) return (float)d;
+		if (cvIsNumeric(s, d) && std::isfinite(d)) return (float)d;
 		break;
 
 	default:
@@ -175,17 +175,17 @@ var CVValueMap::coerceVar(const var& v, Controllable::Type t, bool* ok)
 	case Controllable::BOOL:
 		if (v.isBool()) return v;
 		if (v.isString()) return coerce(v.toString(), t, ok);
-		if (v.isArray()) break;
+		if (v.isArray() || !std::isfinite((double)v)) break;
 		return (double)v != 0;
 
 	case Controllable::INT:
 		if (v.isString()) return coerce(v.toString(), t, ok);
-		if (v.isArray()) break;
-		return (int)v;
+		if (v.isArray() || !std::isfinite((double)v)) break;
+		return v.isInt() || v.isInt64() || v.isBool() ? (int)v : roundToInt((double)v); //round, do not truncate
 
 	case Controllable::FLOAT:
 		if (v.isString()) return coerce(v.toString(), t, ok);
-		if (v.isArray()) break;
+		if (v.isArray() || !std::isfinite((double)v)) break; //a NaN from a device must not reach the variable
 		return (float)v;	//no string round trip : 33.333332f stays 33.333332f
 
 	case Controllable::STRING:
@@ -232,6 +232,19 @@ String CVValueMap::getOutputControllableType(Controllable::Type controlType) con
 
 // --- the transform -----------------------------------------------------------
 
+//Linear remaps one number. A colour, a point or a text that is not a number has no place on the line : fail instead of
+//casting it to 0 (and a NaN would poison everything downstream)
+static bool linearInput(const var& v, double& out)
+{
+	if (v.isArray() || v.isObject() || v.isVoid() || v.isUndefined()) return false;
+	if (v.isString())
+	{
+		if (!cvIsNumeric(v.toString(), out)) return false;
+	}
+	else out = (double)v;
+	return std::isfinite(out);
+}
+
 var CVValueMap::forward(const var& controlValue, Controllable::Type controlType, bool* success)
 {
 	if (success != nullptr) *success = true;
@@ -257,12 +270,13 @@ var CVValueMap::forward(const var& controlValue, Controllable::Type controlType,
 	{
 		const float a = inMin->floatValue(), b = inMax->floatValue();
 		const float c = outMin->floatValue(), d = outMax->floatValue();
-		if (std::abs(b - a) < 1e-12f)
+		double x = 0;
+		if (std::abs(b - a) < 1e-12f || !linearInput(controlValue, x))
 		{
 			if (success != nullptr) *success = false;
 			return var();
 		}
-		float r = c + ((float)controlValue - a) * (d - c) / (b - a);
+		float r = c + ((float)x - a) * (d - c) / (b - a);
 		if (clampLinear->boolValue()) r = jlimit(jmin(c, d), jmax(c, d), r);
 		return coerceVar(r, outT, success);
 	}
@@ -294,12 +308,13 @@ var CVValueMap::inverse(const var& deviceValue, Controllable::Type controlType, 
 	{
 		const float a = inMin->floatValue(), b = inMax->floatValue();
 		const float c = outMin->floatValue(), d = outMax->floatValue();
-		if (std::abs(d - c) < 1e-12f)
+		double x = 0;
+		if (std::abs(d - c) < 1e-12f || !linearInput(deviceValue, x))
 		{
 			if (success != nullptr) *success = false;
 			return var();
 		}
-		float r = a + ((float)deviceValue - c) * (b - a) / (d - c);
+		float r = a + ((float)x - c) * (b - a) / (d - c);
 		if (clampLinear->boolValue()) r = jlimit(jmin(a, b), jmax(a, b), r);
 		return coerceVar(r, controlType, success);
 	}

@@ -214,7 +214,24 @@ void AutomationMappingLayer::sequencePlayStateChangedInternal(Sequence* s)
 
 void AutomationMappingLayer::sequenceLooped(Sequence* s)
 {
-	if (recorder.isRecording->boolValue()) stopRecorderAndAddKeys();
+	//Called from the sequence's play thread. Stopping the recorder rewrites the keys, which is message-thread work like the
+	//recording itself : post it, after the time changes of the last frames before the loop point, which are recorded first.
+	if (!recorder.isRecording->boolValue()) return;
+
+	if (MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		stopRecorderAndAddKeys();
+		return;
+	}
+
+	WeakReference<Inspectable> weakThis(this);
+	MessageManager::callAsync([weakThis]()
+		{
+			if (AutomationMappingLayer* l = dynamic_cast<AutomationMappingLayer*>(weakThis.get()))
+			{
+				if (l->recorder.isRecording->boolValue()) l->stopRecorderAndAddKeys();
+			}
+		});
 }
 
 bool AutomationMappingLayer::canEvaluateOnPlayThread()

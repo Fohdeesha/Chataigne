@@ -36,7 +36,8 @@ MappingFilter::ProcessResult StringSliceFilter::processSingleParameterInternal(P
 	if (e < s) e += str.length() + 1;
 
 	String result = str.substring(s, e);
-	if (result == str) return ProcessResult::UNCHANGED;
+	//always write the result : the output must follow the input even when this filter leaves it as is, otherwise it keeps
+	//the last sliced string and the mapping sends that stale value
 	out->setValue(result);
 
 	return ProcessResult::CHANGED;
@@ -80,11 +81,11 @@ MappingFilter::ProcessResult StringReplaceFilter::processSingleParameterInternal
 		catch (const std::regex_error& e)
 		{
 			NLOGWARNING("String Replace", "Invalid regular expression '" << pat << "': " << e.what());
-			return ProcessResult::UNCHANGED;
+			result = str; //pass the input through unchanged
 		}
 	}
 
-	if (result == str) return ProcessResult::UNCHANGED;
+	//always write the result : when nothing was replaced the output is the input, not the last replaced string
 	out->setValue(result);
 	return ProcessResult::CHANGED;
 }
@@ -133,8 +134,7 @@ MappingFilter::ProcessResult StringOffsetFilter::processSingleParameterInternal(
 		result += String::fromUTF8(&c, 1);
 	};
 
-	if (result == str) return ProcessResult::UNCHANGED;
-	out->setValue(result);
+	out->setValue(result); //always write, see StringSliceFilter
 
 	return ProcessResult::CHANGED;
 }

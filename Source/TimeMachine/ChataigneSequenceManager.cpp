@@ -56,13 +56,20 @@ void ChataigneSequenceManager::processMessage(const OSCMessage& m, const String&
 {
 	//Stable OSC addresses targeting the sequence currently opened in the editor, independent of sequence and layer names :
 	// /sequences/current/layers/<layer number, 1-based>/<controllable> or /sequences/current/<controllable or container path>
-	//OSC Remote Control only calls this for addresses that didn't match an existing controllable, from its network thread : resolve and handle on the message thread
+	//OSC Remote Control only calls this for addresses that didn't match an existing controllable, on the message thread.
+	//Handled right away there, so it keeps its place among the other messages; from any other thread it is handed over.
 
 	StringArray addrSplit;
 	addrSplit.addTokens(m.getAddressPattern().toString(), "/", "\"");
 	addrSplit.removeEmptyStrings();
 
 	if (addrSplit.size() < 3 || addrSplit[0] != shortName || addrSplit[1] != "current") return;
+
+	if (MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		handleCurrentSequenceMessage(m);
+		return;
+	}
 
 	OSCMessage msg(m);
 	MessageManager::callAsync([msg]() { if (ChataigneSequenceManager* sm = getInstanceWithoutCreating()) sm->handleCurrentSequenceMessage(msg); });

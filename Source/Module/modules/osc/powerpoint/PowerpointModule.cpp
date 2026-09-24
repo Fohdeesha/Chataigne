@@ -111,6 +111,7 @@ void PowerPointModule::finished(URL::DownloadTask* task, bool success)
 void PowerPointModule::processMessageInternal(const OSCMessage& m)
 {
 	String s = m.getAddressPattern().toString();
-	if (s == "/currentSlide") currentSlide->setValue(m[0].getInt32());
-	if (s == "/totalSlides") totalSlides->setValue(m[0].getInt32());
+	if (m.size() < 1) return; //any packet can arrive on the port : never read an argument that is not there
+	if (s == "/currentSlide") currentSlide->setValue(OSCHelpers::getIntArg(m[0]));
+	if (s == "/totalSlides") totalSlides->setValue(OSCHelpers::getIntArg(m[0]));
 }

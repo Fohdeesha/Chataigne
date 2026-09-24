@@ -49,6 +49,7 @@ CVBinding::CVBinding(CVVariable* owner) :
 	outValuesCC("Out Value"),
 	outValue(nullptr),
 	applyingFeedback(false),
+	handlingFeedback(false),
 	isLoadingBinding(false),
 	initialSyncDone(false),
 	echoPending(false),
@@ -108,6 +109,10 @@ Do nothing : leave both sides as they are.");
 
 	sendNow = addTrigger("Send Now", "Send the current value immediately, ignoring deadband and rate limit.");
 	pullFromFeedback = addTrigger("Pull From Feedback", "Read the feedback source now and adopt its value, without sending anything.");
+
+	//a binding sends on a change of its variable, Send Now or On Load, never because one of its commands was edited
+	sendTo->sendOnCommandChange = false;
+	sendToWhenFalse->sendOnCommandChange = false;
 
 	//nothing may reach a device until the initial sync runs
 	sendTo->setForceDisabled(true);
@@ -191,7 +196,50 @@ void CVBinding::setFeedbackParam(Parameter* p)
 
 void CVBinding::updateFeedbackFromTarget()
 {
-	setFeedbackParam(feedbackFrom != nullptr ? dynamic_cast<Parameter*>(feedbackFrom->target.get()) : nullptr);
+	Parameter* p = feedbackFrom != nullptr ? dynamic_cast<Parameter*>(feedbackFrom->target.get()) : nullptr;
+	if (feedbackFollowsControl(p))
+	{
+		NLOGWARNING(niceName, "Feedback From cannot be this variable, its value in the Custom Variables module or a parameter referencing it : the variable would feed itself. Feedback is off until another source is chosen.");
+		p = nullptr;
+	}
+	setFeedbackParam(p);
+}
+
+bool CVBinding::feedbackFollowsControl(Parameter* p) const
+{
+	Parameter* control = getControlParameter();
+	if (p == nullptr || control == nullptr) return false;
+	if (p == control) return true;
+
+	//the variable's own value in the Custom Variables module, which mirrors it
+	if (GenericControllableManagerLinkedContainer* lc = dynamic_cast<GenericControllableManagerLinkedContainer*>(p->parentContainer.get()))
+	{
+		if (lc->linkMap.contains(p) && lc->linkMap[p] == control) return true;
+	}
+
+	//a parameter set to follow the variable (or its mirror) by reference
+	if (p->controlMode == Parameter::REFERENCE && p->referenceTarget != nullptr)
+	{
+		if (Parameter* r = dynamic_cast<Parameter*>(p->referenceTarget->target.get()))
+		{
+			if (r != p && r == control) return true;
+			if (GenericControllableManagerLinkedContainer* lc = dynamic_cast<GenericControllableManagerLinkedContainer*>(r->parentContainer.get()))
+			{
+				if (lc->linkMap.contains(r) && lc->linkMap[r] == control) return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+//An enum is read by key on both sides : the variable sends its key, so the device side is compared and mapped by key too
+//(getValue() returns the option's data, which never matched the echo of what was sent)
+var CVBinding::readFeedbackValue(Parameter* p)
+{
+	if (p == nullptr) return var();
+	if (EnumParameter* ep = dynamic_cast<EnumParameter*>(p)) return ep->getValueKey();
+	return p->getValue();
 }
 
 void CVBinding::rebuildOutValue()
@@ -276,6 +324,15 @@ void CVBinding::controlValueChanged()
 
 void CVBinding::controlTriggered()
 {
+	//a Trigger variable notifies on the thread that fired it (a sequence's play thread, a script) : sending belongs to the
+	//message thread, where every other binding path runs
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		WeakReference<CVBinding> safeThis(this);
+		MessageManager::callAsync([safeThis]() { if (CVBinding* b = safeThis.get()) b->controlTriggered(); });
+		return;
+	}
+
 	if (applyingFeedback) return;
 	if (!isActive()) return;
 
@@ -284,6 +341,15 @@ void CVBinding::controlTriggered()
 
 void CVBinding::requestSend(const var& controlValue, bool bypassDeadband)
 {
+	//everything below (timers, the send depth counter, the commands) is message-thread state
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		WeakReference<CVBinding> safeThis(this);
+		const var v = controlValue.clone();
+		MessageManager::callAsync([safeThis, v, bypassDeadband]() { if (CVBinding* b = safeThis.get()) b->requestSend(v, bypassDeadband); });
+		return;
+	}
+
 	if (!isActive()) return;
 
 	//deadband on the control side
@@ -343,11 +409,16 @@ void CVBinding::performSend(const var& controlValue)
 	}
 	const ScopedValueSetter<int> depth(cvSendDepth, cvSendDepth + 1);
 
+	//this value is the newest : a rate-limited one still queued is older, and sending it afterwards would leave the device
+	//on the older value
+	sendQueued = false;
+	sendTimer.stopTimer();
+
 	bool ok = true;
 	const var mapped = valueMap.forward(controlValue, getControlType(), &ok);
 	if (!ok)
 	{
-		NLOGWARNING(niceName, "No Value Map entry for control value \"" << controlValue.toString() << "\", nothing sent.");
+		NLOGWARNING(niceName, "The Value Map gives no device value for control value \"" << controlValue.toString() << "\", nothing sent.");
 		return;
 	}
 
@@ -393,7 +464,7 @@ void CVBinding::reconcileWithFeedback()
 	if (feedbackParam == nullptr || feedbackParam.wasObjectDeleted()) return;
 
 	//the feedback source holds the device's latest word : if it still disagrees, it wins
-	handleFeedbackValue(feedbackParam->getValue());
+	handleFeedbackValue(readFeedbackValue(feedbackParam.get()));
 }
 
 
@@ -401,6 +472,22 @@ void CVBinding::reconcileWithFeedback()
 
 void CVBinding::handleFeedbackValue(const var& deviceValue)
 {
+	//applyingFeedback only suppresses the echo when the variable notifies synchronously, i.e. on the message thread :
+	//written from elsewhere, its notification arrives after the flag is cleared and the adopted value went back out
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		WeakReference<CVBinding> safeThis(this);
+		const var v = deviceValue.clone();
+		MessageManager::callAsync([safeThis, v]() { if (CVBinding* b = safeThis.get()) b->handleFeedbackValue(v); });
+		return;
+	}
+
+	//a feedback source that follows the variable (directly, or through something the filter in updateFeedbackFromTarget
+	//does not know about) calls back in from the write below : with an inverting map that never converged and overflowed
+	//the stack. The write is what the source now reports, there is nothing left to apply.
+	if (handlingFeedback) return;
+	const ScopedValueSetter<bool> handling(handlingFeedback, true);
+
 	if (!isActive()) return;
 
 	Parameter* p = getControlParameter();
@@ -437,12 +524,18 @@ void CVBinding::handleFeedbackValue(const var& deviceValue)
 		if (std::abs((double)mapped - (double)p->getValue()) < deadband->floatValue()) return;
 	}
 
-	applyingFeedback = true;
+	//the device's word is newer than a value still waiting for the rate limit : sending that afterwards would drive the
+	//device to a value neither side shows any more
+	sendQueued = false;
+	sendTimer.stopTimer();
 
-	if (EnumParameter* ep = dynamic_cast<EnumParameter*>(p)) ep->setValueWithKey(mapped.toString());
+	const ScopedValueSetter<bool> applying(applyingFeedback, true);
+
+	if (EnumParameter* ep = dynamic_cast<EnumParameter*>(p))
+	{
+		if (!ep->setValueWithKey(mapped.toString())) ep->setValueWithData(mapped);
+	}
 	else p->setValue(mapped);
-
-	applyingFeedback = false;
 }
 
 void CVBinding::doInitialSync()
@@ -475,7 +568,7 @@ void CVBinding::doInitialSync()
 
 	case OL_ADOPT:
 	{
-		if (feedbackParam != nullptr && !feedbackParam.wasObjectDeleted()) handleFeedbackValue(feedbackParam->getValue());
+		if (feedbackParam != nullptr && !feedbackParam.wasObjectDeleted()) handleFeedbackValue(readFeedbackValue(feedbackParam.get()));
 	}
 	break;
 
@@ -509,30 +602,54 @@ void CVBinding::onExternalParameterValueChanged(Parameter* p)
 {
 	ControllableContainer::onExternalParameterValueChanged(p);
 
-	if (p != nullptr && p == feedbackParam) handleFeedbackValue(p->getValue());
+	if (p != nullptr && p == feedbackParam) handleFeedbackValue(readFeedbackValue(p));
 }
 
 void CVBinding::onContainerTriggerTriggered(Trigger* t)
 {
 	ControllableContainer::onContainerTriggerTriggered(t);
 
-	if (t == sendNow)
+	if (t != sendNow && t != pullFromFeedback) return;
+
+	//A trigger runs its listeners on the thread that fired it : OSC, a dashboard, or a Trigger command on a sequence's
+	//play thread. Both actions re-register listeners, write the variable and send, all of which is message-thread work.
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
 	{
-		if (Parameter* p = getControlParameter())
-		{
-			var v = p->getValue();
-			if (EnumParameter* ep = dynamic_cast<EnumParameter*>(p)) v = ep->getValueKey();
-			requestSend(v, true);
-		}
+		WeakReference<CVBinding> safeThis(this);
+		const bool isSendNow = t == sendNow;
+		MessageManager::callAsync([safeThis, isSendNow]()
+			{
+				if (CVBinding* b = safeThis.get())
+				{
+					if (isSendNow) b->sendNowInternal();
+					else b->pullFromFeedbackInternal();
+				}
+			});
+		return;
 	}
-	else if (t == pullFromFeedback)
+
+	if (t == sendNow) sendNowInternal();
+	else pullFromFeedbackInternal();
+}
+
+void CVBinding::sendNowInternal()
+{
+	if (!isActive()) return;
+	if (Parameter* p = getControlParameter())
 	{
-		updateFeedbackFromTarget();
-		if (feedbackParam != nullptr && !feedbackParam.wasObjectDeleted())
-		{
-			echoPending = false; //explicit user request : do not suppress
-			handleFeedbackValue(feedbackParam->getValue());
-		}
+		var v = p->getValue();
+		if (EnumParameter* ep = dynamic_cast<EnumParameter*>(p)) v = ep->getValueKey();
+		performSend(v); //"ignoring deadband and rate limit", as its description says
+	}
+}
+
+void CVBinding::pullFromFeedbackInternal()
+{
+	updateFeedbackFromTarget();
+	if (feedbackParam != nullptr && !feedbackParam.wasObjectDeleted())
+	{
+		echoPending = false; //explicit user request : do not suppress
+		handleFeedbackValue(readFeedbackValue(feedbackParam.get()));
 	}
 }
 
