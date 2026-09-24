@@ -524,6 +524,7 @@ void Mapping::filterManagerNeedsProcess()
 
 void Mapping::clearItem()
 {
+	stopThread(1000); //the continuous thread processes the inputs cleared below : it was only stopped by the destructor
 	Processor::clearItem();
 
 	fm.removeFilterManagerListener(this);

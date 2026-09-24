@@ -79,6 +79,12 @@ public:
 
 	void dmxDataInChanged(DMXDevice*, int net, int subnet, int universe,/*int priority,*/ Array<uint8> values, const String& sourceName = "") override;
 
+	//DMX input arrives on the device's receive thread (Art-Net, sACN, an Enttec port) : it looked up and created universes,
+	//set their values and ran scripts there. It is handled on the message thread ; the latest frame of each universe is
+	//kept until then (DMX is a state : a frame replaced before it is handled carries nothing the newer one does not).
+	void handleDMXIn(int net, int subnet, int universe, Array<uint8> values, const String& sourceName);
+	void handlePendingDMXIn();
+
 	DMXUniverse* getUniverse(bool isInput, int net, int subnet, int universe, /*int priority,*/ bool createIfNotThere = true);
 
 	void run() override;
@@ -118,6 +124,29 @@ public:
 	};
 
 	ModuleRouterController* createModuleRouterController(ModuleRouter* router) override { return new DMXModuleRouterController(router); }
+
+private:
+	struct PendingDMXIn
+	{
+		int net = 0, subnet = 0, universe = 0;
+		Array<uint8> values;
+		String sourceName;
+	};
+
+	class DMXInQueue :
+		public AsyncUpdater
+	{
+	public:
+		DMXInQueue(DMXModule& m) : module(m) {}
+		DMXModule& module;
+		void handleAsyncUpdate() override { module.handlePendingDMXIn(); }
+	};
+
+	CriticalSection dmxInLock;
+	Array<PendingDMXIn> pendingDMXIn; //one per universe, in arrival order
+	DMXInQueue dmxInQueue;
+
+public:
 
 	static DMXModule* create() { return new DMXModule(); }
 	virtual String getDefaultTypeString() const override { return "DMX"; }

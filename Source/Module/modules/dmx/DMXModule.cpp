@@ -17,7 +17,8 @@ DMXModule::DMXModule() :
 	Thread("DMX Send"),
 	dmxDevice(nullptr),
 	inputUniverseManager(true),
-	outputUniverseManager(false)
+	outputUniverseManager(false),
+	dmxInQueue(*this)
 {
 	outputUniverseManager.setNiceName("Output Universes");
 	setupIOConfiguration(false, true);
@@ -320,7 +321,13 @@ var DMXModule::sendDMXUniverseFromScript(const var::NativeFunctionArgs& args)
 void DMXModule::clearItem()
 {
 	BaseItem::clearItem();
-	setCurrentDMXDevice(nullptr);
+	setCurrentDMXDevice(nullptr); //the device's receive thread is joined when it is destroyed
+
+	{
+		const ScopedLock sl(dmxInLock);
+		pendingDMXIn.clear();
+	}
+	dmxInQueue.cancelPendingUpdate();
 }
 
 var DMXModule::getJSONData(bool includeNonOverriden)
@@ -423,6 +430,62 @@ void DMXModule::dmxDeviceSetupChanged(DMXDevice*)
 
 }
 void DMXModule::dmxDataInChanged(DMXDevice*, int net, int subnet, int universe, /*int priority,*/ Array<uint8> values, const String& sourceName)
+{
+	if (isClearing || !enabled->boolValue()) return;
+
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		{
+			const ScopedLock sl(dmxInLock);
+			bool replaced = false;
+			for (auto& p : pendingDMXIn)
+			{
+				if (p.net == net && p.subnet == subnet && p.universe == universe)
+				{
+					p.values = values;
+					p.sourceName = sourceName;
+					replaced = true;
+					break;
+				}
+			}
+
+			if (!replaced)
+			{
+				if (pendingDMXIn.size() >= 1024) return; //more universes than anything sends : a flood of made-up ones
+				PendingDMXIn p;
+				p.net = net;
+				p.subnet = subnet;
+				p.universe = universe;
+				p.values = values;
+				p.sourceName = sourceName;
+				pendingDMXIn.add(p);
+			}
+		}
+		dmxInQueue.triggerAsyncUpdate();
+		return;
+	}
+
+	handleDMXIn(net, subnet, universe, values, sourceName);
+}
+
+void DMXModule::handlePendingDMXIn()
+{
+	Array<PendingDMXIn> frames;
+	{
+		const ScopedLock sl(dmxInLock);
+		frames.swapWith(pendingDMXIn);
+	}
+
+	WeakReference<Inspectable> self(this); //a script reacting to the data could remove this module
+	for (auto& f : frames)
+	{
+		if (isClearing) return;
+		handleDMXIn(f.net, f.subnet, f.universe, f.values, f.sourceName);
+		if (self.wasObjectDeleted()) return;
+	}
+}
+
+void DMXModule::handleDMXIn(int net, int subnet, int universe, Array<uint8> values, const String& sourceName)
 {
 	if (isClearing || !enabled->boolValue()) return;
 	if (logIncomingData->boolValue())

@@ -85,27 +85,35 @@ void ZeroconfManager::showMenuAndGetService(StringRef searcherName, std::functio
 		return;
 	}
 
+	//A copy : the searcher's thread adds, updates and deletes services while the menu is open, and the callback indexed
+	//the live list afterwards (a deleted service, or another one)
+	auto snapshot = std::make_shared<OwnedArray<ServiceInfo>>();
+	{
+		const ScopedLock sl(s->services.getLock());
+		for (auto& info : s->services) snapshot->add(info->clone());
+	}
+
 	PopupMenu p;
-	if (s->services.isEmpty())
+	if (snapshot->isEmpty())
 	{
 		p.addItem(-1, "No service found", false);
 	}
 	else
 	{
-		for (int i = 0; i < s->services.size(); i++)
+		for (int i = 0; i < snapshot->size(); i++)
 		{
-			ServiceInfo* info = s->services[i];
+			ServiceInfo* info = snapshot->getUnchecked(i);
 			if (nameFilter.isNotEmpty() && !info->name.contains(nameFilter)) continue;
 			p.addItem(1 + i, info->name + " on " + info->host + " (" + info->getIP() + ":" + String(info->port) + ")");
 		}
 	}
 
 	
-	p.showMenuAsync(PopupMenu::Options(), [s, returnFunc](int result)
+	p.showMenuAsync(PopupMenu::Options(), [snapshot, returnFunc](int result)
 		{
-			if (result <= 0) return;
+			if (result <= 0 || result > snapshot->size()) return;
 
-			returnFunc(s->services[result - 1]);
+			returnFunc(snapshot->getUnchecked(result - 1));
 		}
 	);
 }
@@ -149,6 +157,7 @@ void ZeroconfManager::ZeroconfSearcher::shutdown()
 
 ZeroconfManager::ServiceInfo* ZeroconfManager::ZeroconfSearcher::getService(StringRef sName, StringRef host, int port)
 {
+	const ScopedLock sl(services.getLock());
 	for (auto& i : services)
 	{
 		if (Thread::getCurrentThread()->threadShouldExit()) return nullptr;
@@ -185,10 +194,14 @@ void ZeroconfManager::ZeroconfSearcher::removeService(ServiceInfo* s)
 void ZeroconfManager::ZeroconfSearcher::updateService(ServiceInfo* service, StringRef host, StringRef ip, int port, const HashMap<String, String>& keys)
 {
 	jassert(service != nullptr);
-	service->host = host;
-	service->ip = ip;
-	service->port = port;
-	service->setKeys(keys);
+	{
+		const ScopedLock sl(services.getLock()); //the menu copies them on the message thread
+		service->host = host;
+		service->ip = ip;
+		service->port = port;
+		service->setKeys(keys);
+		service->isLocal = NetworkHelpers::isIPLocal(ip);
+	}
 
 	//NLOG("Zeroconf", "New " << name << " service updated : " << service->name << " on " << service->host << ", " << service->ip << ":" << service->port << (service->isLocal ? " (local)" : ""));
 	listeners.call(&SearcherListener::serviceUpdated, service);

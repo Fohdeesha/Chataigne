@@ -43,6 +43,7 @@ public:
 		String getKey(String key) { return keys.contains(key) ? keys[key] : ""; }
 
 		String getIP() const { return isLocal ? "127.0.0.1" : ip; }
+		ServiceInfo* clone() const { return new ServiceInfo(name, host, ip, port, keys); }
 
 		JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ServiceInfo)
 
@@ -59,7 +60,8 @@ public:
 		String name;
 		String serviceName;
 		std::unique_ptr<servus::Servus> servus;
-		OwnedArray<ServiceInfo> services;
+		//Changed on this searcher's thread, read by the menu on the message thread : under its lock
+		OwnedArray<ServiceInfo, CriticalSection> services;
 		CriticalSection servusLock;
 
 		ServiceInfo * getService(StringRef name, StringRef host, int port);
