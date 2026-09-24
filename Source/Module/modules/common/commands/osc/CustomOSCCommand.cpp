@@ -9,6 +9,7 @@
 */
 
 #include "Module/ModuleIncludes.h"
+#include "Common/Processor/Mapping/MappingEditScope.h"
 
 CustomOSCCommand::CustomOSCCommand(IOSCSenderModule* module, CommandContext context, var params, Multiplex* multiplex) :
 	OSCCommand(module, context, params, multiplex),
@@ -95,6 +96,7 @@ void CustomOSCCommand::updateWildcardsMap(const String& address)
 
 void CustomOSCCommand::onContainerParameterChanged(Parameter* p)
 {
+	MappingEditScope editScope(this); //the wildcards map and container a play thread reads
 	OSCCommand::onContainerParameterChanged(p);
 	if (p == address)
 	{

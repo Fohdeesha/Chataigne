@@ -35,12 +35,14 @@ BaseCommand::~BaseCommand()
 
 void BaseCommand::onControllableAdded(Controllable* c)
 {
+	MappingEditScope editScope(this); //the parameter links a mapping's play thread walks
 	ParamLinkContainer::onControllableAdded(c);
 	commandListeners.call(&CommandListener::commandContentChanged);
 }
 
 void BaseCommand::onControllableRemoved(Controllable* c)
 {
+	MappingEditScope editScope(this);
 	ParamLinkContainer::onControllableRemoved(c);
 	commandListeners.call(&CommandListener::commandContentChanged);
 	
@@ -199,11 +201,15 @@ void BaseCommand::trigger(int multiplexIndex)
 		return;
 	}
 
+	//arguments are added and removed on the message thread while a sequence's play thread or a launcher runs this : the
+	//list stays put for the whole command, and a removed argument is deleted only after it has left it
+	ScopedOptionalLock argsLock(customValuesManager != nullptr ? &customValuesManager->items.getLock() : nullptr);
 	triggerInternal(multiplexIndex);
 }
 
 void BaseCommand::setValue(var value, int multiplexIndex)
 {
+	ScopedOptionalLock argsLock(customValuesManager != nullptr ? &customValuesManager->items.getLock() : nullptr);
 	updateMappingInputValue(value, multiplexIndex);
 	setValueInternal(value, multiplexIndex);
 	trigger(multiplexIndex);

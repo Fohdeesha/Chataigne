@@ -65,6 +65,7 @@ Mapping::Mapping(var params, Multiplex* multiplex, bool canBeDisabled) :
 
 Mapping::~Mapping()
 {
+	acceptsEditLock = false;
 	stopThread(100);
 	clearItem();
 }
@@ -546,7 +547,9 @@ void Mapping::run()
 			continue;
 		}
 
-		process();
+		//never waits : an edit on the message thread holds the mapping while it replaces what process() uses, and this
+		//thread must not be the one it waits for (stopThread from under that lock would then time out and kill it)
+		processIfFree();
 
 		//Sleep until the next slot of a fixed grid anchored at loop start, so the rate does not drift below updateRate
 		//by the millisecond rounding and wake-up latency of every wait (same scheme as Sequence::run)
@@ -554,6 +557,25 @@ void Mapping::run()
 		double nextSlot = (floor(elapsed / rateMillis) + 1) * rateMillis;
 		wait(nextSlot - elapsed);
 	}
+}
+
+MappingEditScope::MappingEditScope(ControllableContainer* cc)
+{
+	for (ControllableContainer* c = cc; c != nullptr; c = c->parentContainer.get())
+	{
+		if (Mapping* m = dynamic_cast<Mapping*>(c))
+		{
+			if (!m->acceptsEditLock) return;
+			lock = &m->mappingLock;
+			lock->enter();
+			return;
+		}
+	}
+}
+
+MappingEditScope::~MappingEditScope()
+{
+	if (lock != nullptr) lock->exit();
 }
 
 ProcessorUI* Mapping::getUI()

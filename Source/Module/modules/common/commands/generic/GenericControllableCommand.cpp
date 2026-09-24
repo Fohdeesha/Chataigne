@@ -11,6 +11,7 @@
 
 #include "Module/ModuleIncludes.h"
 #include "GenericControllableCommand.h"
+#include "Common/Processor/Mapping/MappingEditScope.h"
 
 GenericControllableCommand::GenericControllableCommand(Module* _module, CommandContext context, var params, Multiplex* multiplex) :
 	BaseCommand(_module, context, params, multiplex),
@@ -98,6 +99,7 @@ void GenericControllableCommand::setTargetParam(Parameter* p)
 
 void GenericControllableCommand::updateComponentFromTarget()
 {
+	MappingEditScope editScope(this); //the options and the value parameter are what a play thread reads
 	if (componentOperator == nullptr) return;
 
 	bool curUpdating = isUpdatingContent;
@@ -139,6 +141,7 @@ void GenericControllableCommand::updateComponentFromTarget()
 
 void GenericControllableCommand::updateValueFromTargetAndComponent()
 {
+	MappingEditScope editScope(this); //deletes the value parameter a play thread may be setting from
 	bool curUpdating = isUpdatingContent;
 	isUpdatingContent = true;
 
@@ -232,6 +235,7 @@ Controllable* GenericControllableCommand::getControllableFromTarget()
 
 void GenericControllableCommand::updateOperatorOptions()
 {
+	MappingEditScope editScope(this); //clears the operator a play thread reads
 	bool curUpdating = isUpdatingContent;
 	isUpdatingContent = true;
 

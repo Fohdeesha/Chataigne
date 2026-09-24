@@ -90,6 +90,8 @@ MappingFilter::ProcessResult MappingFilterManager::processFilters(Array<Paramete
 	Array<Parameter*> fp = inputs;
 	MappingFilter::ProcessResult result = MappingFilter::UNCHANGED;
 
+	//called holding filterLock, but adding a filter grows this list outside it : walk it under its own lock
+	const ScopedLock itemsLock(items.getLock());
 	for (auto& f : items)
 	{
 		if(needsRebuild) return MappingFilter::STOP_HERE;

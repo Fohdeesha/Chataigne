@@ -64,6 +64,7 @@
 #include "Mapping/Output/MappingOutputManager.h"
 
 #include "Mapping/Mapping.h"
+#include "Mapping/MappingEditScope.h"
 
 #include "Mapping/Filter/filters/ScriptFilter.h"
 #include "Mapping/Filter/filters/color/ColorShiftFilter.h"

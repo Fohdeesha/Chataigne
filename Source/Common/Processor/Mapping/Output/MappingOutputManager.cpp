@@ -9,6 +9,7 @@
 */
 
 #include "Common/Processor/ProcessorIncludes.h"
+#include "Common/Processor/Mapping/MappingEditScope.h"
 
 MappingOutputManager::MappingOutputManager(Multiplex * multiplex) :
 	BaseManager<MappingOutput>("Outputs"),
@@ -63,7 +64,12 @@ void MappingOutputManager::updateOutputValues(int multiplexIndex, bool sendOnOut
 	if (value.isVoid()) return; //possible if parameters have been deleted in another thread during process
 	if (sendOnOutputChangedOnly && value == prevMergedValue[multiplexIndex]) return;
 
-	for (auto& i : items) i->setValue(value, multiplexIndex);
+	{
+		//a sequence's play thread walks the outputs : one removed on the message thread leaves the list only between two
+		//frames, and is deleted after that
+		const ScopedLock itemsLock(items.getLock());
+		for (auto& i : items) i->setValue(value, multiplexIndex);
+	}
 	prevMergedValue.set(multiplexIndex, value);
 }
 
@@ -73,6 +79,8 @@ void MappingOutputManager::updateOutputValue(MappingOutput * o, int multiplexInd
 	if (outParams.size() == 0) return;
 	if (o == nullptr) return;
 
+	const ScopedLock itemsLock(items.getLock());
+	if (!items.contains(o)) return;
 	o->setValue(getMergedOutValue(multiplexIndex), multiplexIndex);
 }
 
@@ -116,6 +124,7 @@ void MappingOutputManager::removeItemInternal(MappingOutput * o)
 
 void MappingOutputManager::commandChanged(BaseCommandHandler * h)
 {
+	MappingEditScope editScope(this); //updating the commands' value types can rebuild their parameters
 	for (auto& o : items) o->updateCommandOutParams();
 	if (!sendOnCommandChange) return;
 	for (int i = 0; i < getMultiplexCount(); i++)
@@ -126,6 +135,7 @@ void MappingOutputManager::commandChanged(BaseCommandHandler * h)
 
 void MappingOutputManager::commandUpdated(BaseCommandHandler * h)
 {
+	MappingEditScope editScope(this);
 	for (auto& o : items) o->updateCommandOutParams();
 	if (!sendOnCommandChange) return;
 	for (int i = 0; i < getMultiplexCount(); i++) updateOutputValue(dynamic_cast<MappingOutput *>(h), i);

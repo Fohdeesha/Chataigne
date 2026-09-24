@@ -162,6 +162,7 @@ Parameter* MappingFilter::setupSingleParameterInternal(Parameter* source, int mu
 
 void MappingFilter::onContainerParameterChangedInternal(Parameter* p)
 {
+	MappingEditScope editScope(this);
 	if (p == enabled) mappingFilterListeners.call(&FilterListener::filterStateChanged, this);
 }
 
@@ -170,6 +171,7 @@ void MappingFilter::onControllableFeedbackUpdateInternal(ControllableContainer* 
 {
 	if (cc == &filterParams)
 	{
+		MappingEditScope editScope(this); //a parameter change can rebuild the filtered parameters (Remap's Force Float)
 		filterParamsAreDirty = true;
 		filterParamChanged((Parameter*)p);
 		mappingFilterListeners.call(&FilterListener::filterNeedsProcess, this);

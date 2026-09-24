@@ -39,6 +39,7 @@ public:
 	ProcessMode processMode;
 
 	CriticalSection mappingLock;
+	bool acceptsEditLock = true; //false from the start of the destructor : mappingLock dies before om and fm do
 	bool isRebuilding;
 	bool isProcessing;
 	bool shouldRebuildAfterProcess;

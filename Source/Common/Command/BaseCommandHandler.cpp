@@ -11,6 +11,7 @@
 #include "BaseCommandHandler.h"
 #include "CommandFactory.h"
 #include "ui/BaseCommandHandlerEditor.h"
+#include "Common/Processor/Mapping/MappingEditScope.h"
 
 BaseCommandHandler::BaseCommandHandler(const String& name, CommandContext _context, Module* _lockedModule, Multiplex* multiplex) :
 	BaseItem(name),
@@ -51,6 +52,8 @@ void BaseCommandHandler::triggerCommand(int multiplexIndex)
 void BaseCommandHandler::setCommand(CommandDefinition* commandDef)
 {
 	if (!commandDefinition.wasObjectDeleted() && commandDefinition == commandDef) return;
+
+	MappingEditScope editScope(this); //in a mapping's output, the old command is deleted here
 
 	var prevCommandData;
 	if (command != nullptr)
