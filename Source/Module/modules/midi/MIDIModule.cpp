@@ -22,7 +22,9 @@ MIDIModule::MIDIModule(const String& name, bool _useGenericControls) :
 	lastClockReceiveTimeIndex(0),
 	mtcCC("MTC"),
 	infoCC("Infos"),
-	useGenericControls(_useGenericControls)
+	useGenericControls(_useGenericControls),
+	inputQueueUpdater(*this),
+	noteOffTimer(*this)
 {
 	valuesCC.customControllableComparator = &MIDIModule::midiValueComparator;
 
@@ -111,11 +113,61 @@ MIDIModule::MIDIModule(const String& name, bool _useGenericControls) :
 
 MIDIModule::~MIDIModule()
 {
+	//clearItem() normally did all of this already, while the module was whole
+	noteOffTimer.stopTimer();
+	inputQueueUpdater.cancelPendingUpdate();
 	outClock.stop();
 	if (inputDevice != nullptr) inputDevice->removeMIDIInputListener(this);
-	if (outputDevice != nullptr) outputDevice->close();
+	mtcReceiver.reset();
+	MIDIOutputDevice* d = nullptr;
+	{
+		const ScopedLock sl(outputLock);
+		d = outputDevice;
+		outputDevice = nullptr;
+	}
+	if (d != nullptr) d->close();
 }
 
+void MIDIModule::clearItem()
+{
+	//The driver's thread, the queue and the note off timer must all be done with this module before Module::clearItem()
+	//and the destructor take apart what they report into. Owed note offs go out now, while the output is still open.
+	if (inputDevice != nullptr) inputDevice->removeMIDIInputListener(this); //waits for a message being dispatched
+	inputDevice = nullptr;
+	mtcReceiver.reset();
+
+	inputQueueUpdater.cancelPendingUpdate();
+	{
+		const ScopedLock sl(inputQueueLock);
+		inputQueue.clear();
+	}
+
+	sendPendingNoteOffs(true);
+	noteOffTimer.stopTimer();
+	outClock.stop();
+
+	MIDIOutputDevice* d = nullptr;
+	{
+		const ScopedLock sl(outputLock);
+		d = outputDevice;
+		outputDevice = nullptr;
+	}
+	outClock.setOutDevice(nullptr);
+	if (d != nullptr) d->close(); //sends what is still queued first
+
+	Module::clearItem();
+}
+
+bool MIDIModule::withOutput(std::function<void(MIDIOutputDevice*)> f)
+{
+	const ScopedLock sl(outputLock);
+	if (outputDevice == nullptr) return false;
+	f(outputDevice);
+	return true;
+}
+
+//Each send : the checks, the log and the activity trigger first, the device only under outputLock (nothing that can wait
+//on another lock runs while holding it). The unlocked outputDevice test is only a shortcut, withOutput() decides.
 
 void MIDIModule::sendNoteOn(int channel, int pitch, int velocity)
 {
@@ -129,7 +181,7 @@ void MIDIModule::sendNoteOn(int channel, int pitch, int velocity)
 
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send Note on, channel : " << channel << ", note : " << MIDIManager::getNoteName(pitch) << " (pitch : " << String(pitch) + "), velocity : " << velocity);
 	outActivityTrigger->trigger();
-	outputDevice->sendNoteOn(channel, pitch, velocity);
+	withOutput([&](MIDIOutputDevice* d) { d->sendNoteOn(channel, pitch, velocity); });
 }
 
 void MIDIModule::sendNoteOff(int channel, int pitch)
@@ -145,7 +197,59 @@ void MIDIModule::sendNoteOff(int channel, int pitch)
 
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send Note off, channel : " << channel << ", note : " << MIDIManager::getNoteName(pitch) << " (pitch : " << String(pitch) + ")");
 	outActivityTrigger->trigger();
-	outputDevice->sendNoteOff(channel, pitch);
+	withOutput([&](MIDIOutputDevice* d) { d->sendNoteOff(channel, pitch); });
+}
+
+void MIDIModule::scheduleNoteOff(int channel, int pitch, double delayMs)
+{
+	if (pitch < 0) return;
+
+	const ScopedLock sl(pendingNoteOffLock);
+	const double due = Time::getMillisecondCounterHiRes() + jmax(0.0, delayMs);
+
+	//a note played again while still held is extended : one note off, at the end, as before
+	bool found = false;
+	for (auto& p : pendingNoteOffs)
+	{
+		if (p.channel == channel && p.pitch == pitch)
+		{
+			p.dueMs = due;
+			found = true;
+		}
+	}
+	if (!found) pendingNoteOffs.add({ channel, pitch, due });
+
+	//starting never waits for a callback in flight (only stopping does), so this is safe under the lock
+	if (!noteOffTimer.isTimerRunning()) noteOffTimer.startTimer(1);
+}
+
+void MIDIModule::sendPendingNoteOffs(bool all)
+{
+	Array<PendingNoteOff> due;
+	{
+		const ScopedLock sl(pendingNoteOffLock);
+		const double now = Time::getMillisecondCounterHiRes();
+		for (int i = pendingNoteOffs.size() - 1; i >= 0; --i)
+		{
+			if (all || pendingNoteOffs.getReference(i).dueMs <= now)
+			{
+				due.insert(0, pendingNoteOffs[i]);
+				pendingNoteOffs.remove(i);
+			}
+		}
+
+		//stopping from the timer's own thread does not wait ; from another thread it waits for a callback in flight,
+		//which needs this lock : only the timer stops itself
+		if (pendingNoteOffs.isEmpty() && !all) noteOffTimer.stopTimer();
+	}
+
+	//completing a note that was played : not subject to the Enabled switch (disabling flushes these first, see
+	//updateMIDIDevices), and silently nothing when there is no output any more
+	for (auto& p : due)
+	{
+		if (logOutgoingData->boolValue()) NLOG(niceName, "Send Note off, channel : " << p.channel << ", note : " << MIDIManager::getNoteName(p.pitch) << " (pitch : " << String(p.pitch) + ")");
+		withOutput([&](MIDIOutputDevice* d) { d->sendNoteOff(p.channel, p.pitch); });
+	}
 }
 
 void MIDIModule::sendControlChange(int channel, int number, int value)
@@ -154,7 +258,7 @@ void MIDIModule::sendControlChange(int channel, int number, int value)
 	if (outputDevice == nullptr) return;
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send Control Change, channel : " << channel << ", number : " << number << ", value " << value);
 	outActivityTrigger->trigger();
-	outputDevice->sendControlChange(channel, number, value);
+	withOutput([&](MIDIOutputDevice* d) { d->sendControlChange(channel, number, value); });
 }
 
 void MIDIModule::sendProgramChange(int channel, int program)
@@ -163,7 +267,7 @@ void MIDIModule::sendProgramChange(int channel, int program)
 	if (outputDevice == nullptr) return;
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send ProgramChange, channel : " << channel << ", program : " << program);
 	outActivityTrigger->trigger();
-	outputDevice->sendProgramChange(channel, program);
+	withOutput([&](MIDIOutputDevice* d) { d->sendProgramChange(channel, program); });
 }
 
 void MIDIModule::sendSysex(Array<uint8> data)
@@ -177,7 +281,7 @@ void MIDIModule::sendSysex(Array<uint8> data)
 		NLOG(niceName, s);
 	}
 	outActivityTrigger->trigger();
-	outputDevice->sendSysEx(data);
+	withOutput([&](MIDIOutputDevice* d) { d->sendSysEx(data); });
 }
 
 void MIDIModule::sendPitchWheel(int channel, int value)
@@ -185,7 +289,7 @@ void MIDIModule::sendPitchWheel(int channel, int value)
 	if (!enabled->boolValue()) return;
 	if (outputDevice == nullptr) return;
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send PitchWheel channel : " << channel << ", value : " << value);
-	outputDevice->sendPitchWheel(channel, value);
+	withOutput([&](MIDIOutputDevice* d) { d->sendPitchWheel(channel, value); });
 }
 
 void MIDIModule::sendChannelPressure(int channel, int value)
@@ -193,7 +297,7 @@ void MIDIModule::sendChannelPressure(int channel, int value)
 	if (!enabled->boolValue()) return;
 	if (outputDevice == nullptr) return;
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send Channel Pressure channel : " << channel << ", value : " << value);
-	outputDevice->sendChannelPressure(channel, value);
+	withOutput([&](MIDIOutputDevice* d) { d->sendChannelPressure(channel, value); });
 }
 
 void MIDIModule::sendAfterTouch(int channel, int note, int value)
@@ -201,7 +305,7 @@ void MIDIModule::sendAfterTouch(int channel, int note, int value)
 	if (!enabled->boolValue()) return;
 	if (outputDevice == nullptr) return;
 	if (logOutgoingData->boolValue()) NLOG(niceName, "Send After touch channel : " << channel << ", note : " << note << ", value : " << value);
-	outputDevice->sendAfterTouch(channel, note, value);
+	withOutput([&](MIDIOutputDevice* d) { d->sendAfterTouch(channel, note, value); });
 }
 
 void MIDIModule::sendFullFrameTimecode(int hours, int minutes, int seconds, int frames, MidiMessage::SmpteTimecodeType timecodeType)
@@ -212,7 +316,7 @@ void MIDIModule::sendFullFrameTimecode(int hours, int minutes, int seconds, int 
 	{
 		NLOG(niceName, "Send full frame timecode : " << hours << ":" << minutes << ":" << seconds << "." << frames << " / " << timecodeType);
 	}
-	outputDevice->sendFullframeTimecode(hours, minutes, seconds, frames, timecodeType);
+	withOutput([&](MIDIOutputDevice* d) { d->sendFullframeTimecode(hours, minutes, seconds, frames, timecodeType); });
 }
 
 void MIDIModule::sendMidiMachineControlCommand(MidiMessage::MidiMachineControlCommand command)
@@ -223,7 +327,7 @@ void MIDIModule::sendMidiMachineControlCommand(MidiMessage::MidiMachineControlCo
 	{
 		NLOG(niceName, "Send midi machine control command : " << command);
 	}
-	outputDevice->sendMidiMachineControlCommand(command);
+	withOutput([&](MIDIOutputDevice* d) { d->sendMidiMachineControlCommand(command); });
 }
 
 void MIDIModule::sendMidiMachineControlGoto(int hours, int minutes, int seconds, int frames)
@@ -234,7 +338,7 @@ void MIDIModule::sendMidiMachineControlGoto(int hours, int minutes, int seconds,
 	{
 		NLOG(niceName, "Send midi machine control goto : " << hours << ":" << minutes << ":" << seconds << "." << frames);
 	}
-	outputDevice->sendMidiMachineControlGoto(hours, minutes, seconds, frames);
+	withOutput([&](MIDIOutputDevice* d) { d->sendMidiMachineControlGoto(hours, minutes, seconds, frames); });
 }
 
 
@@ -271,13 +375,15 @@ void MIDIModule::onControllableFeedbackUpdateInternal(ControllableContainer* cc,
 			}
 		}
 	}
-	else if (c == sendClock)
+
+	//not an "else" of Auto Feedback : with Auto Feedback on, turning Send Clock off never stopped the clock thread
+	if (c == sendClock)
 	{
 		outClock.stop();
 
 		if (sendClock->boolValue())
 		{
-			if (outputDevice != nullptr) outClock.setOutDevice(outputDevice->device.get());
+			outClock.setOutDevice(outputDevice);
 			outClock.setBPM(bpm->floatValue());
 			outClock.start();
 		}
@@ -321,7 +427,7 @@ void MIDIModule::updateMIDIDevices()
 
 	if (newInput != inputDevice)
 	{
-		if (inputDevice != nullptr) inputDevice->removeMIDIInputListener(this);
+		if (inputDevice != nullptr) inputDevice->removeMIDIInputListener(this); //waits for a message being dispatched
 		mtcReceiver.reset();
 		mtcIsPlaying->setValue(false);
 		inputDevice = newInput;
@@ -337,18 +443,21 @@ void MIDIModule::updateMIDIDevices()
 
 	if (newOutput != outputDevice)
 	{
-		if (outputDevice != nullptr)
+		//notes a Full Note still owes go to the output that played them, before it goes
+		sendPendingNoteOffs(true);
+
+		MIDIOutputDevice* oldOutput = nullptr;
 		{
-			if (sendClock->boolValue()) outClock.setOutDevice(nullptr);
-			outputDevice->close();
+			const ScopedLock sl(outputLock); //a send in flight finishes first, the next one sees the new device
+			oldOutput = outputDevice;
+			outputDevice = newOutput;
 		}
 
-		outputDevice = newOutput;
-		if (outputDevice != nullptr)
-		{
-			outputDevice->open();
-			if (sendClock->boolValue()) outClock.setOutDevice(outputDevice->device.get());
-		}
+		//the clock thread holds the device too, running or not : MIDIManager deletes an unplugged one right after this
+		outClock.setOutDevice(outputDevice);
+
+		if (oldOutput != nullptr) oldOutput->close();
+		if (outputDevice != nullptr) outputDevice->open();
 	}
 
 
@@ -357,7 +466,100 @@ void MIDIModule::updateMIDIDevices()
 	isConnected->setValue(inputDevice != nullptr || outputDevice != nullptr);
 }
 
-void MIDIModule::noteOnReceived(const int& channel, const int& pitch, const int& velocity)
+void MIDIModule::midiMessageReceived(const MidiMessage& msg)
+{
+	//the MIDI driver's thread : queue only
+	{
+		const ScopedLock sl(inputQueueLock);
+		if ((int)inputQueue.size() >= 10000)
+		{
+			droppedInput++;
+			return;
+		}
+		inputQueue.push_back(msg);
+	}
+	inputQueueUpdater.triggerAsyncUpdate();
+}
+
+void MIDIModule::handleQueuedInput()
+{
+	//In arrival order, for at most 20 ms a pass : the rest waits for the next pass, so a flood never holds the message
+	//thread (a value added by Auto Add re-sorts the whole list, and a batch of 10 000 took tens of seconds, during which
+	//the interface, a project load and even closing the window all waited)
+	const uint32 start = Time::getMillisecondCounter();
+	WeakReference<Inspectable> self(this); //a script reacting to a message could remove this module
+	bool drained = false;
+	for (;;)
+	{
+		if (isClearing) return;
+
+		MidiMessage m;
+		{
+			const ScopedLock sl(inputQueueLock);
+			drained = inputQueue.empty();
+			if (drained) break;
+			m = std::move(inputQueue.front());
+			inputQueue.pop_front();
+		}
+
+		dispatchInput(m);
+		if (self.wasObjectDeleted()) return;
+
+		if (Time::getMillisecondCounter() - start >= 20)
+		{
+			inputQueueUpdater.triggerAsyncUpdate();
+			break;
+		}
+	}
+
+	//at most one warning every 5 s during a flood, and the rest once it is over
+	int dropped = 0;
+	const uint32 now = Time::getMillisecondCounter();
+	if (drained || now - lastDropLog >= 5000)
+	{
+		const ScopedLock sl(inputQueueLock);
+		dropped = droppedInput;
+		droppedInput = 0;
+	}
+
+	if (dropped > 0)
+	{
+		lastDropLog = now;
+		NLOGWARNING(niceName, "Dropped " << dropped << " incoming MIDI message(s) : they arrived faster than they could be handled");
+	}
+}
+
+void MIDIModule::dispatchInput(const MidiMessage& message)
+{
+	//message thread, in arrival order, and sorted as MIDIInputDevice sorts them
+	handleThru(message);
+
+	if (message.isNoteOn()) handleNoteOn(message.getChannel(), message.getNoteNumber(), message.getVelocity());
+	else if (message.isNoteOff()) handleNoteOff(message.getChannel(), message.getNoteNumber(), 0); //force note off to velocity 0
+	else if (message.isController()) handleControlChange(message.getChannel(), message.getControllerNumber(), message.getControllerValue());
+	else if (message.isProgramChange()) handleProgramChange(message.getChannel(), message.getProgramChangeNumber());
+	else if (message.isFullFrame()) handleFullFrameTimecode(message);
+	else if (message.isQuarterFrame()) {} //the MTC receiver's, on the driver's thread
+	else if (message.isPitchWheel()) handlePitchWheel(message.getChannel(), message.getPitchWheelValue());
+	else if (message.isChannelPressure()) handleChannelPressure(message.getChannel(), message.getChannelPressureValue());
+	else if (message.isAftertouch()) handleAfterTouch(message.getChannel(), message.getNoteNumber(), message.getAfterTouchValue());
+	else if (message.isMidiClock())
+	{
+		if (enabled->boolValue()) inActivityTrigger->trigger(); //the tempo itself was measured on arrival
+	}
+	else if (message.isMidiStart()) handleMidiStart();
+	else if (message.isMidiStop()) handleMidiStop();
+	else if (message.isMidiContinue()) handleMidiContinue();
+	else if (message.isMidiMachineControlMessage()) handleMidiMachineControlCommand(message.getMidiMachineControlCommand());
+	else if (message.isSysEx()) handleSysEx(message);
+	else
+	{
+		int hours, minutes, seconds, frames;
+		if (message.isMidiMachineControlGoto(hours, minutes, seconds, frames)) handleMidiMachineControlGoto(hours, minutes, seconds, frames);
+	}
+}
+
+void MIDIModule::handleNoteOn(int channel, int pitch, int velocity)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -381,7 +583,7 @@ void MIDIModule::noteOnReceived(const int& channel, const int& pitch, const int&
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(noteOnEventId, Array<var>(channel, pitch, velocity));
 }
 
-void MIDIModule::noteOffReceived(const int& channel, const int& pitch, const int& velocity)
+void MIDIModule::handleNoteOff(int channel, int pitch, int velocity)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -399,7 +601,7 @@ void MIDIModule::noteOffReceived(const int& channel, const int& pitch, const int
 
 }
 
-void MIDIModule::controlChangeReceived(const int& channel, const int& number, const int& value)
+void MIDIModule::handleControlChange(int channel, int number, int value)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -411,7 +613,7 @@ void MIDIModule::controlChangeReceived(const int& channel, const int& number, co
 
 }
 
-void MIDIModule::programChangeReceived(const int& channel, const int& value)
+void MIDIModule::handleProgramChange(int channel, int value)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -422,7 +624,7 @@ void MIDIModule::programChangeReceived(const int& channel, const int& value)
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(programChangeId, Array<var>(channel, value));
 }
 
-void MIDIModule::sysExReceived(const MidiMessage& msg)
+void MIDIModule::handleSysEx(const MidiMessage& msg)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -453,7 +655,7 @@ void MIDIModule::sysExReceived(const MidiMessage& msg)
 	scriptManager->callFunctionOnAllItems(sysexEventId, args);
 }
 
-void MIDIModule::fullFrameTimecodeReceived(const MidiMessage& msg)
+void MIDIModule::handleFullFrameTimecode(const MidiMessage& msg)
 {
 	if (!enabled->boolValue()) return;
 	inActivityTrigger->trigger();
@@ -469,7 +671,7 @@ void MIDIModule::fullFrameTimecodeReceived(const MidiMessage& msg)
 	}
 }
 
-void MIDIModule::pitchWheelReceived(const int& channel, const int& value)
+void MIDIModule::handlePitchWheel(int channel, int value)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -480,7 +682,7 @@ void MIDIModule::pitchWheelReceived(const int& channel, const int& value)
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(pitchWheelEventId, Array<var>(channel, value));
 }
 
-void MIDIModule::channelPressureReceived(const int& channel, const int& value)
+void MIDIModule::handleChannelPressure(int channel, int value)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -491,7 +693,7 @@ void MIDIModule::channelPressureReceived(const int& channel, const int& value)
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(channelPressureId, Array<var>(channel, value));
 }
 
-void MIDIModule::afterTouchReceived(const int& channel, const int& note, const int& value)
+void MIDIModule::handleAfterTouch(int channel, int note, int value)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -502,7 +704,7 @@ void MIDIModule::afterTouchReceived(const int& channel, const int& note, const i
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(afterTouchId, Array<var>(channel, note, value));
 }
 
-void MIDIModule::midiMessageReceived(const MidiMessage& msg)
+void MIDIModule::handleThru(const MidiMessage& msg)
 {
 	if (!enabled->boolValue()) return;
 
@@ -510,15 +712,13 @@ void MIDIModule::midiMessageReceived(const MidiMessage& msg)
 	{
 		for (auto& c : thruManager->controllables)
 		{
-			if (TargetParameter* mt = (TargetParameter*)c)
+			if (TargetParameter* mt = dynamic_cast<TargetParameter*>(c))
 			{
 				if (!mt->enabled) continue;
-				if (MIDIModule* m = (MIDIModule*)(mt->targetContainer.get()))
+				if (MIDIModule* m = dynamic_cast<MIDIModule*>(mt->targetContainer.get()))
 				{
-					if (m->midiParam->outputDevice != nullptr && m->midiParam->outputDevice->device != nullptr)
-					{
-						m->midiParam->outputDevice->device->sendMessageNow(msg);
-					}
+					//queued on that device, and dropped if it is not open
+					if (m->midiParam->outputDevice != nullptr) m->midiParam->outputDevice->sendMessageNow(msg);
 				}
 			}
 		}
@@ -527,8 +727,9 @@ void MIDIModule::midiMessageReceived(const MidiMessage& msg)
 
 void MIDIModule::midiClockReceived()
 {
+	//the MIDI driver's thread : the tempo is measured on arrival, and only a parameter is set from here (notified on
+	//the message thread). The activity blink comes with the queued message.
 	if (!enabled->boolValue()) return;
-	inActivityTrigger->trigger();
 
 	//if (logIncomingData->boolValue())
 	//{
@@ -568,7 +769,7 @@ void MIDIModule::midiClockReceived()
 
 }
 
-void MIDIModule::midiStartReceived()
+void MIDIModule::handleMidiStart()
 {
 	if (!enabled->boolValue()) return;
 	inActivityTrigger->trigger();
@@ -579,7 +780,7 @@ void MIDIModule::midiStartReceived()
 	midiStartTrigger->trigger();
 }
 
-void MIDIModule::midiStopReceived()
+void MIDIModule::handleMidiStop()
 {
 	if (!enabled->boolValue()) return;
 	inActivityTrigger->trigger();
@@ -590,7 +791,7 @@ void MIDIModule::midiStopReceived()
 	midiStopTrigger->trigger();
 }
 
-void MIDIModule::midiContinueReceived()
+void MIDIModule::handleMidiContinue()
 {
 	if (!enabled->boolValue()) return;
 	inActivityTrigger->trigger();
@@ -601,7 +802,7 @@ void MIDIModule::midiContinueReceived()
 	midiContinueTrigger->trigger();
 }
 
-void MIDIModule::midiMachineControlCommandReceived(const MidiMessage::MidiMachineControlCommand& type)
+void MIDIModule::handleMidiMachineControlCommand(MidiMessage::MidiMachineControlCommand type)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -610,7 +811,7 @@ void MIDIModule::midiMachineControlCommandReceived(const MidiMessage::MidiMachin
 	if (scriptManager->items.size() > 0) scriptManager->callFunctionOnAllItems(machineControlCommandId, Array<var>((int)type));
 }
 
-void MIDIModule::midiMachineControlGotoReceived(const int& hours, const int& minutes, const int& seconds, const int& frames)
+void MIDIModule::handleMidiMachineControlGoto(int hours, int minutes, int seconds, int frames)
 {
 	if (!enabled->boolValue() && !manualAddMode) return;
 	inActivityTrigger->trigger();
@@ -893,27 +1094,27 @@ void MIDIModule::showMenuAndCreateValue(ControllableContainer* container)
 
 						if (mResult == 3)
 						{
-							module->pitchWheelReceived(channel, 0);
+							module->handlePitchWheel(channel, 0);
 						}
 						else if (mResult == 4)
 						{
-							module->channelPressureReceived(channel, 0);
+							module->handleChannelPressure(channel, 0);
 						}
 						else if (mResult == 5)
 						{
-							module->afterTouchReceived(channel, window->getTextEditorContents("pitch").getIntValue(), 0);
+							module->handleAfterTouch(channel, window->getTextEditorContents("pitch").getIntValue(), 0);
 						}
 						else if (mResult == 6)
 						{
-							module->programChangeReceived(channel, 0);
+							module->handleProgramChange(channel, 0);
 						}
 						else
 						{
 							int pitch = jlimit<int>(0, 127, window->getTextEditorContents("pitch").getIntValue());
 
 							module->manualAddMode = true;
-							if (mResult == 1) module->noteOnReceived(channel, pitch, 0);
-							else module->controlChangeReceived(channel, pitch, 0);
+							if (mResult == 1) module->handleNoteOn(channel, pitch, 0);
+							else module->handleControlChange(channel, pitch, 0);
 							module->manualAddMode = false;
 						}
 					}

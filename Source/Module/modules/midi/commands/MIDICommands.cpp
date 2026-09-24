@@ -30,9 +30,7 @@ MIDINoteAndCCCommand::MIDINoteAndCCCommand(MIDIModule* module, CommandContext co
 	octave(nullptr),
 	noteMode(nullptr),
 	number(nullptr),
-	maxRemap(127),
-	fullNoteChan(0),
-	fullNotePitch(0)
+	maxRemap(127)
 {
 	channel = addIntParameter("Channel", "Channel for the note message", 1, 1, 16);
 	type = (MessageType)(int)params.getProperty("type", 0);
@@ -170,10 +168,9 @@ void MIDINoteAndCCCommand::triggerInternal(int multiplexIndex)
 		break;
 
 	case FULL_NOTE:
+		//the module owes the note off, so it goes out even if this command is deleted before then (see MIDIModule)
 		midiModule->sendNoteOn(chanVal, pitch, velVal);
-		fullNoteChan = chanVal;
-		fullNotePitch = pitch;
-		startTimer(onTime->floatValue() * 1000);
+		midiModule->scheduleNoteOff(chanVal, pitch, onTime->floatValue() * 1000.0);
 		break;
 
 	case CONTROLCHANGE:
@@ -209,12 +206,6 @@ void MIDINoteAndCCCommand::onContainerParameterChanged(Parameter* p)
 	{
 		updateNoteParams();
 	}
-}
-
-void MIDINoteAndCCCommand::hiResTimerCallback()
-{
-	stopTimer();
-	if (!moduleRef.wasObjectDeleted()) midiModule->sendNoteOff(fullNoteChan, fullNotePitch);
 }
 
 

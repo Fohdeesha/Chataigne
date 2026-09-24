@@ -60,6 +60,9 @@ public:
 		virtual void midiMachineControlGotoReceived(const int&/*hours*/, const int&/*minutes*/, const int&/*seconds*/, const int&/*frames*/) {}
 	};
 
+	//Listeners are called on the MIDI driver's thread, holding this lock. Adding and removing take it too, so a listener
+	//is never called again once its removal returns - the next thing its owner does may be to delete it.
+	CriticalSection listenerLock;
 	ListenerList<MIDIInputListener> inputListeners;
 	void addMIDIInputListener(MIDIInputListener* newListener);
 	void removeMIDIInputListener(MIDIInputListener* listener);
@@ -69,19 +72,22 @@ public:
 };
 
 
+//Sends are queued and go out in order on this device's own thread : the callers (a sequence's play thread, a clock,
+//the MTC sender, the message thread) never wait on the driver, which busy-waits for a whole SysEx (165 ms for 512 bytes),
+//and none of them ever touches the MidiOutput, which close() replaces.
 class MIDIOutputDevice :
-	public MIDIDevice
+	public MIDIDevice,
+	private Thread
 {
 public:
 	MIDIOutputDevice(const MidiDeviceInfo &info);
 	~MIDIOutputDevice();
 
-	std::unique_ptr<MidiOutput> device;
-	int usageCount;
+	int usageCount; //open / close, message thread
 
 	void open();
-
-	void close();
+	void close(); //when the last user closes, what is still queued goes out first (a final note off, a clock stop)
+	bool isOpen();
 
 	void sendNoteOn(int channel, int pitch, int velocity);
 	void sendNoteOff(int channel, int pitch);
@@ -95,7 +101,16 @@ public:
 	void sendPitchWheel(int channel, int value);
 	void sendChannelPressure(int channel, int value);
 	void sendAfterTouch(int channel, int note, int value);
-	void sendMessageNow(const MidiMessage &message);
+	void sendMessageNow(const MidiMessage &message); //queued, see above
+
+private:
+	CriticalSection queueLock; //the device and the queue
+	std::unique_ptr<MidiOutput> device;
+	std::deque<MidiMessage> queue;
+	static constexpr int maxQueueSize = 4096; //a device that stopped draining must not grow memory without bound
+	int droppedCount = 0;
+
+	void run() override;
 
 	JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MIDIOutputDevice)
 };

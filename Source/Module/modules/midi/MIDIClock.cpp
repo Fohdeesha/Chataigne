@@ -38,7 +38,7 @@ void MIDIClockSender::setBPM(double newBPM)
 	waitInterval = 60000 / (bpm * ticksPerBeat);
 }
 
-void MIDIClockSender::setOutDevice(MidiOutput* outDevice)
+void MIDIClockSender::setOutDevice(MIDIOutputDevice* outDevice)
 {
 	bool isRunning = isThreadRunning();
 	stop();

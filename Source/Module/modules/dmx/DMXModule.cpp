@@ -198,6 +198,7 @@ void DMXModule::sendDMXRange(DMXUniverse* u, int startChannel, Array<uint8> valu
 	startChannel--; //rebase at 0
 
 
+	GenericScopedLock lock(u->valuesLock); //the whole range in one frame
 	for (int i = startChannel; i < startChannel + values.size() && i < DMX_NUM_CHANNELS; i++)
 	{
 		u->updateValue(i, values[i - startChannel]);
@@ -217,6 +218,7 @@ void DMXModule::send16BitDMXValue(DMXUniverse* u, int channel, int value, DMXByt
 
 	channel--; //rebase at 0
 
+	GenericScopedLock lock(u->valuesLock); //both bytes in one frame
 	u->updateValue(channel, byteOrder == MSB ? (value >> 8) & 0xFF : value & 0xFF);
 	u->updateValue(channel + 1, byteOrder == MSB ? value & 0xFF : (value >> 8) & 0xFF);
 }
@@ -234,6 +236,7 @@ void DMXModule::send16BitDMXRange(DMXUniverse* u, int startChannel, Array<int> v
 
 	startChannel--; //rebase at 0
 
+	GenericScopedLock lock(u->valuesLock); //the whole range in one frame
 	for (int i = 0; i < values.size(); ++i)
 	{
 		int index = startChannel + i * 2;
@@ -483,29 +486,31 @@ DMXUniverse* DMXModule::getUniverse(bool isInput, int net, int subnet, int unive
 
 void DMXModule::run()
 {
+	//Frames on a grid anchored at the start : waiting (period - time spent) after each frame added the wake-up latency to
+	//every period, 40 Hz came out at ~38.7. A frame that overruns skips to the next slot instead of bunching up.
+	const double start = Time::getMillisecondCounterHiRes();
 	while (!threadShouldExit())
 	{
-		double t1 = Time::getMillisecondCounterHiRes();
 		{
 			GenericScopedLock lock(deviceLock);
 			if (dmxDevice == nullptr) return;
 
 			bool sendOnChange = sendOnChangeOnly->boolValue();
+			GenericScopedLock ulock(outputUniverseManager.items.getLock()); //universes are added and removed on the message thread
 			for (auto& u : outputUniverseManager.items)
 			{
 				if (sendOnChange && !u->isDirty) continue;
-				dmxDevice->setDMXValues(u);
-				u->isDirty = false;
+				Array<uint8> frame = u->takeFrame(true); //copy and clear the flag together
+				dmxDevice->setDMXValues(u->net, u->subnet, u->universe, frame.getRawDataPointer(), frame.size());
 			}
+
+			dmxDevice->frameReady();
 		}
-		double t2 = Time::getMillisecondCounterHiRes();
 
-		double diffTime = t2 - t1;
-		double rateMS = 1000.0 / sendRate->intValue();
-
-		double msToWait = rateMS - diffTime;
-		if (msToWait > 0) wait(msToWait);
-
+		const double rateMS = 1000.0 / jmax(1, sendRate->intValue());
+		const double elapsed = Time::getMillisecondCounterHiRes() - start;
+		const double msToWait = (std::floor(elapsed / rateMS) + 1) * rateMS - elapsed;
+		wait(msToWait);
 	}
 }
 

@@ -30,9 +30,10 @@ PlayAudioFileCommand::PlayAudioFileCommand(AudioModule* _module, CommandContext 
 	std::unique_ptr<PlayAudioFileCommandProcessor> proc(new PlayAudioFileCommandProcessor(this));
 	currentProcessor = proc.get();
 
-	graphID = AudioProcessorGraph::NodeID(audioModule->uidIncrement++);
-
-	audioModule->graph.addNode(std::move(proc), graphID);
+	//The graph picks the id (one above every id it holds). Our own counter collided with the audio layers' once enough of
+	//them had been set up, and addNode then refused the node and destroyed the processor we still pointed to.
+	if (AudioProcessorGraph::Node::Ptr node = audioModule->graph.addNode(std::move(proc))) graphID = node->nodeID;
+	else currentProcessor = nullptr;
 
 	int numChannels = audioModule->graph.getMainBusNumOutputChannels();
 	AudioChannelSet channelSet = audioModule->graph.getChannelLayoutOfBus(false, 0);
@@ -51,13 +52,24 @@ PlayAudioFileCommand::PlayAudioFileCommand(AudioModule* _module, CommandContext 
 
 PlayAudioFileCommand::~PlayAudioFileCommand()
 {
+	//The device's thread renders the processor holding the graph's callback lock, and keeps rendering it until the next
+	//block picks up the graph without it : let go of this command first, under that lock, then remove the node
+	if (currentProcessor != nullptr)
+	{
+		if (audioModule != nullptr)
+		{
+			const ScopedLock sl(audioModule->graph.getCallbackLock());
+			currentProcessor->clear();
+		}
+		else currentProcessor->clear();
+	}
+
 	if (audioModule != nullptr && !audioModule->isClearing)
 	{
 		audioModule->removeAudioModuleListener(this);
 		audioModule->graph.removeNode(graphID);
 	}
 
-	currentProcessor->clear();
 	currentProcessor = nullptr;
 }
 
@@ -65,15 +77,18 @@ void PlayAudioFileCommand::updateSelectedOutChannels()
 {
 	selectedOutChannels.clear();
 
-	if (audioModule == nullptr) return;
+	if (audioModule == nullptr || currentProcessor == nullptr) return;
 
 	audioModule->graph.disconnectNode(graphID);
 
 	numActiveOutputs = 0;
 	for (int i = 0; i < channelsCC.controllables.size(); ++i) if (((BoolParameter*)channelsCC.controllables[i])->boolValue()) numActiveOutputs++;
 
-	currentProcessor->setPlayConfigDetails(0, numActiveOutputs, audioModule->currentSampleRate, audioModule->currentBufferSize);
-	currentProcessor->prepareToPlay(audioModule->currentSampleRate, audioModule->currentBufferSize);
+	{
+		const ScopedLock sl(audioModule->graph.getCallbackLock()); //the processor may be rendering right now
+		currentProcessor->setPlayConfigDetails(0, numActiveOutputs, audioModule->currentSampleRate, audioModule->currentBufferSize);
+		currentProcessor->prepareToPlay(audioModule->currentSampleRate, audioModule->currentBufferSize);
+	}
 
 	channelRemapAudioSource.clearAllMappings();
 

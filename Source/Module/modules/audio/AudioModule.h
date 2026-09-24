@@ -83,6 +83,25 @@ public:
 	double currentSampleRate;
 	int currentBufferSize;
 
+	//The setup the graph was last built for : the device manager broadcasts every change of the system's device lists
+	//too, and only a change of this setup is worth a rebuild
+	AudioDeviceManager::AudioDeviceSetup appliedSetup;
+	String appliedDeviceType;
+	bool appliedHadDevice = false;
+	bool hasAppliedSetup = false;
+	bool audioSetupDiffersFromApplied();
+
+	//The device the project asks for is the device manager's own record of the last explicit choice (the one loaded,
+	//or picked by the user since ; a fallback does not change it, and it is what a save writes). When it is not the
+	//one in use the module says so, and it is opened again when it reappears in the system's device list.
+	bool wantedDeviceWasListed = true;
+	bool wantedDeviceMissing = false;
+	static void getWantedNames(const XmlElement& wanted, String& type, String& in, String& out);
+	bool isWantedDeviceInUse(const XmlElement& wanted);
+	bool isWantedDeviceListed(const XmlElement& wanted);
+	void updateDeviceWarning();
+	void tryRestoreWantedDevice();
+
 	BoolParameter* keepLastDetectedValues;
 
 	int uidIncrement;

@@ -28,38 +28,52 @@ MIDIInputDevice::~MIDIInputDevice()
 
 void MIDIInputDevice::addMIDIInputListener(MIDIInputListener* newListener)
 {
-	inputListeners.add(newListener);
-	if (inputListeners.size() == 1)
+	bool shouldOpen = false;
 	{
-		//int deviceIndex = MidiInput::getDevices().indexOf(name);
-		device.reset();
-		device = MidiInput::openDevice(id, this);
-
-		if (device != nullptr)
-		{
-			device->start();
-			LOG("MIDI In " << device->getName() << " opened");
-		}
-		else
-		{
-			LOG("MIDI In " << name << " open error !");
-		}
+		const ScopedLock sl(listenerLock);
+		inputListeners.add(newListener);
+		shouldOpen = inputListeners.size() == 1 && device == nullptr;
 	}
+	if (!shouldOpen) return;
+
+	std::unique_ptr<MidiInput> d = MidiInput::openDevice(id, this);
+	if (d == nullptr)
+	{
+		LOG("MIDI In " << name << " open error !");
+		return;
+	}
+
+	MidiInput* opened = d.get();
+	{
+		const ScopedLock sl(listenerLock);
+		device = std::move(d);
+	}
+	opened->start();
+	LOG("MIDI In " << opened->getName() << " opened");
 }
 
 void MIDIInputDevice::removeMIDIInputListener(MIDIInputListener* listener)
 {
-	inputListeners.remove(listener);
-	if (inputListeners.size() == 0)
+	std::unique_ptr<MidiInput> toClose;
 	{
-		if (device != nullptr) device->stop();
-		device = nullptr;
+		const ScopedLock sl(listenerLock); //waits for a message being dispatched to finish
+		inputListeners.remove(listener);
+		if (inputListeners.size() == 0) toClose = std::move(device);
+	}
+
+	//stopped outside the lock : stop() can wait for a driver callback, and that callback waits for the lock
+	if (toClose != nullptr)
+	{
+		toClose->stop();
+		toClose.reset();
 		LOG("MIDI In " << name << " closed");
 	}
 }
 
 void MIDIInputDevice::handleIncomingMidiMessage(MidiInput* source, const MidiMessage& message)
 {
+	const ScopedLock sl(listenerLock);
+
 	if (source != device.get())
 	{
 		DBG("different device");
@@ -104,116 +118,168 @@ void MIDIInputDevice::handleIncomingMidiMessage(MidiInput* source, const MidiMes
 
 MIDIOutputDevice::MIDIOutputDevice(const MidiDeviceInfo& info) :
 	MIDIDevice(info, MIDI_OUT),
+	Thread("MIDI Out " + info.name),
 	usageCount(0)
 {}
 
 MIDIOutputDevice::~MIDIOutputDevice()
 {
+	//MIDIManager deletes a device that was unplugged, whatever its users still think
+	stopThread(1000);
+	const ScopedLock sl(queueLock);
+	queue.clear();
+	device.reset();
 }
 
 void MIDIOutputDevice::open()
 {
 	usageCount++;
-	if (usageCount == 1)
+	if (usageCount != 1) return;
+
+	std::unique_ptr<MidiOutput> d = MidiOutput::openDevice(id);
+	if (d != nullptr) LOG("MIDI Out " << d->getName() << " opened");
+	else LOGERROR("MIDI Out " << name << " open error");
+
 	{
-		//int deviceIndex = MidiOutput::getAvailableDevices().indexOf(name);
-		device.reset();
-		device = MidiOutput::openDevice(id);// deviceIndex);
-		if (device != nullptr)
-		{
-			LOG("MIDI Out " << device->getName() << " opened");
-		}
-		else
-		{
-			LOGERROR("MIDI Out " << name << " open error");
-		}
+		const ScopedLock sl(queueLock);
+		queue.clear();
+		device = std::move(d);
 	}
+
+	if (device != nullptr) startThread(Thread::Priority::high);
 }
 
 void MIDIOutputDevice::close()
 {
+	if (usageCount <= 0) return;
 	usageCount--;
-	if (usageCount == 0)
+	if (usageCount != 0) return;
+
+	//let what is queued go out (bounded : a stuck driver must not hang the caller), then no more
+	signalThreadShouldExit();
+	notify();
+	if (!waitForThreadToExit(2000)) stopThread(500);
+
+	std::unique_ptr<MidiOutput> d;
 	{
-		device = nullptr;
-		LOG("MIDI Out " << name << " closed");
+		const ScopedLock sl(queueLock);
+		queue.clear();
+		d = std::move(device);
 	}
+	d.reset();
+	LOG("MIDI Out " << name << " closed");
+}
+
+bool MIDIOutputDevice::isOpen()
+{
+	const ScopedLock sl(queueLock);
+	return device != nullptr;
 }
 
 void MIDIOutputDevice::sendNoteOn(int channel, int pitch, int velocity)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::noteOn(channel, pitch, (uint8)velocity));
+	sendMessageNow(MidiMessage::noteOn(channel, pitch, (uint8)velocity));
 }
 
 void MIDIOutputDevice::sendNoteOff(int channel, int pitch)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::noteOff(channel, pitch));
+	sendMessageNow(MidiMessage::noteOff(channel, pitch));
 }
 
 void MIDIOutputDevice::sendControlChange(int channel, int number, int value)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::controllerEvent(channel, number, value));
+	sendMessageNow(MidiMessage::controllerEvent(channel, number, value));
 }
 
 void MIDIOutputDevice::sendProgramChange(int channel, int number)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::programChange(channel, number));
+	sendMessageNow(MidiMessage::programChange(channel, number));
 }
 
 void MIDIOutputDevice::sendSysEx(Array<uint8> data)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::createSysExMessage(data.getRawDataPointer(), data.size()));
+	sendMessageNow(MidiMessage::createSysExMessage(data.getRawDataPointer(), data.size()));
 }
 
 void MIDIOutputDevice::sendFullframeTimecode(int hours, int minutes, int seconds, int frames, MidiMessage::SmpteTimecodeType timecodeType)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::fullFrame(hours, minutes, seconds, frames, timecodeType));
+	sendMessageNow(MidiMessage::fullFrame(hours, minutes, seconds, frames, timecodeType));
 }
 
 void MIDIOutputDevice::sendQuarterframe(int piece, int value)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::quarterFrame(piece, value));
+	sendMessageNow(MidiMessage::quarterFrame(piece, value));
 }
 
 void MIDIOutputDevice::sendMidiMachineControlCommand(MidiMessage::MidiMachineControlCommand command)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::midiMachineControlCommand(command));
+	sendMessageNow(MidiMessage::midiMachineControlCommand(command));
 }
 
 void MIDIOutputDevice::sendMidiMachineControlGoto(int hours, int minutes, int seconds, int frames)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::midiMachineControlGoto(hours, minutes, seconds, frames));
+	sendMessageNow(MidiMessage::midiMachineControlGoto(hours, minutes, seconds, frames));
 }
 
 void MIDIOutputDevice::sendPitchWheel(int channel, int value)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::pitchWheel(channel, value));
+	sendMessageNow(MidiMessage::pitchWheel(channel, value));
 }
 
 void MIDIOutputDevice::sendChannelPressure(int channel, int value)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::channelPressureChange(channel, value));
+	sendMessageNow(MidiMessage::channelPressureChange(channel, value));
 }
 
 void MIDIOutputDevice::sendAfterTouch(int channel, int note, int value)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(MidiMessage::aftertouchChange(channel, note, value));
+	sendMessageNow(MidiMessage::aftertouchChange(channel, note, value));
 }
 
 void MIDIOutputDevice::sendMessageNow(const MidiMessage& message)
 {
-	if (device == nullptr) return;
-	device->sendMessageNow(message);
+	{
+		const ScopedLock sl(queueLock);
+		if (device == nullptr) return;
+		if ((int)queue.size() >= maxQueueSize)
+		{
+			droppedCount++;
+			return;
+		}
+		queue.push_back(message);
+	}
+	notify();
+}
+
+void MIDIOutputDevice::run()
+{
+	while (true)
+	{
+		MidiMessage m;
+		bool have = false;
+		int dropped = 0;
+		{
+			const ScopedLock sl(queueLock);
+			if (!queue.empty())
+			{
+				m = queue.front();
+				queue.pop_front();
+				have = true;
+			}
+			dropped = droppedCount;
+			droppedCount = 0;
+		}
+
+		if (dropped > 0) LOGWARNING("MIDI Out " << name << " : dropped " << dropped << " message(s), the device is not keeping up");
+
+		if (have)
+		{
+			//only this thread sends, and close() stops it before replacing the device
+			if (device != nullptr) device->sendMessageNow(m);
+			continue;
+		}
+
+		if (threadShouldExit()) break; //close() : exit once the queue is empty
+		wait(100);
+	}
 }

@@ -36,9 +36,11 @@ public:
 		bool isFinished();
 	};
 
+	//All three under launches' lock. The thread stays alive and sleeps while there is nothing to launch : it used to exit
+	//when idle and delete what had been added meanwhile without clearing it, and the next start processed freed launches.
 	OwnedArray<Launch, juce::CriticalSection> launches;
-	Array<Launch*, juce::CriticalSection> toAdd;
-	Array<Launch*, juce::CriticalSection> toRemove;
+	Array<Launch*> toAdd;
+	Array<Launch*> toRemove;
 
 	void run() override;
 	void processLaunch(Launch* l);

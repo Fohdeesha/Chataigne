@@ -178,14 +178,19 @@ ConsequenceStaggerLauncher::ConsequenceStaggerLauncher() :
 ConsequenceStaggerLauncher::~ConsequenceStaggerLauncher()
 {
 	stopThread(1000);
+
+	GenericScopedLock lock(launches.getLock());
+	for (auto& l : toAdd) delete l;
+	toAdd.clear();
+	toRemove.clear();
+	launches.clear();
 }
 
 void ConsequenceStaggerLauncher::run()
 {
-	toRemove.clear();
-
 	while (!threadShouldExit())
 	{
+		bool idle = false;
 		{
 			GenericScopedLock lock(launches.getLock());
 
@@ -200,15 +205,16 @@ void ConsequenceStaggerLauncher::run()
 				processLaunch(l);
 				if (l->isFinished()) toRemove.addIfNotAlreadyThere(l);
 			}
+
+			for (auto& l : toRemove) launches.removeObject(l);
+			toRemove.clear();
+
+			idle = launches.isEmpty() && toAdd.isEmpty();
 		}
 
-		if (launches.isEmpty()) break;
-
-		wait(10);
+		//addLaunch() notifies ; a notify that came before this wait still ends it at once
+		wait(idle ? -1 : 10);
 	}
-
-
-	for (auto& l : toAdd) delete l; //clean up unprocessed launches
 }
 
 void ConsequenceStaggerLauncher::processLaunch(Launch* l)
@@ -226,11 +232,9 @@ void ConsequenceStaggerLauncher::processLaunch(Launch* l)
 	int relativeIndex = 0;
 	for (int i = 0; i < l->triggerIndex; i++) if (csm->items[i]->enabled->boolValue()) relativeIndex++;
 
-	//Check if should trigger
-	uint32 curTime = Time::getMillisecondCounter();
-	uint32 triggerTime = l->startTime + d + s * relativeIndex;
-
-	if (curTime < triggerTime) return;
+	//Check if should trigger : elapsed time, which stays right across the counter's wrap every 49.7 days
+	const uint32 elapsed = Time::getMillisecondCounter() - l->startTime;
+	if (elapsed < d + s * (uint32)relativeIndex) return;
 
 	//Get first enabled item starting at index
 	{
@@ -256,17 +260,32 @@ void ConsequenceStaggerLauncher::addLaunch(ConsequenceManager* csm, int multiple
 {
 	if (Engine::mainEngine->isClearing) return;
 
-	toAdd.add(new Launch(csm, multiplexIndex));
+	{
+		GenericScopedLock lock(launches.getLock());
+		toAdd.add(new Launch(csm, multiplexIndex));
+	}
+
 	if (!isThreadRunning()) startThread();
-	else notify();
+	notify();
 }
 
 void ConsequenceStaggerLauncher::removeLaunchesFor(ConsequenceManager* manager, int multiplexIndex)
 {
+	//called by a manager's destructor too : nothing of this manager may be left, including launches not started yet
 	GenericScopedLock lock(launches.getLock());
 	for (auto& l : launches)
 	{
-		if (l->manager == manager && (multiplexIndex == -1 || l->multiplexIndex == multiplexIndex)) toRemove.add(l);
+		if (l->manager == manager && (multiplexIndex == -1 || l->multiplexIndex == multiplexIndex)) toRemove.addIfNotAlreadyThere(l);
+	}
+
+	for (int i = toAdd.size() - 1; i >= 0; --i)
+	{
+		Launch* l = toAdd.getUnchecked(i);
+		if (l->manager == manager && (multiplexIndex == -1 || l->multiplexIndex == multiplexIndex))
+		{
+			toAdd.remove(i);
+			delete l;
+		}
 	}
 }
 

@@ -28,12 +28,12 @@ public:
 	~MIDIClockSender();
 
 	double bpm;
-	MidiOutput* device;
+	MIDIOutputDevice* device; //sends are queued on the device, and dropped once it is closed
 
 	int waitInterval;
 
 	void setBPM(double newBPM);
-	void setOutDevice(MidiOutput* outDevice);
+	void setOutDevice(MIDIOutputDevice* outDevice);
 
 	void start();
 	void stop();

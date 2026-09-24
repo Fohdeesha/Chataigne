@@ -253,6 +253,9 @@ void ChataigneAudioLayer::sequencePlayStateChanged(Sequence* s)
 void ChataigneAudioLayer::audioSetupChanged()
 {
 	updateSelectedOutChannels();
+
+	//the device was stopped for the rebuild while the timeline went on : a playing clip is behind by that gap
+	resyncClipToTimeline();
 }
 
 var ChataigneAudioLayer::getJSONData(bool includeNonOverriden)

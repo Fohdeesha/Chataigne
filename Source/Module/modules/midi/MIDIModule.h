@@ -153,26 +153,76 @@ public:
 	void onControllableFeedbackUpdateInternal(ControllableContainer* cc, Controllable* c) override;
 	virtual void onContainerParameterChangedInternal(Parameter* p) override;
 	void updateMIDIDevices();
+	void clearItem() override;
 
-	virtual void noteOnReceived(const int& channel, const int& pitch, const int& velocity) override;
-	virtual void noteOffReceived(const int& channel, const int& pitch, const int& velocity) override;
-	virtual void controlChangeReceived(const int& channel, const int& number, const int& value) override;
-	virtual void programChangeReceived(const int& channel, const int& value) override;
-	virtual void sysExReceived(const MidiMessage& msg) override;
-	virtual void fullFrameTimecodeReceived(const MidiMessage& msg) override;
-	virtual void pitchWheelReceived(const int& channel, const int& value) override;
-	virtual void channelPressureReceived(const int& channel, const int& value) override;
-	virtual void afterTouchReceived(const int& channel, const int& note, const int& value) override;
-
+	//MIDI input arrives on the driver's thread. There, this module only queues the message (and times the clock) : what
+	//follows walks and changes the values, auto-adds them, fires triggers and runs scripts, all of it message-thread work,
+	//done from the queue in arrival order. The MTC receiver keeps its own realtime path.
 	virtual void midiMessageReceived(const MidiMessage& msg) override;
-
 	virtual void midiClockReceived() override;
-	virtual void midiStartReceived() override;
-	virtual void midiStopReceived() override;
-	virtual void midiContinueReceived() override;
 
-	virtual void midiMachineControlCommandReceived(const MidiMessage::MidiMachineControlCommand& type) override;
-	virtual void midiMachineControlGotoReceived(const int& hours, const int& minutes, const int& seconds, const int& frames) override;
+	void handleQueuedInput();
+	void dispatchInput(const MidiMessage& msg);
+
+	void handleNoteOn(int channel, int pitch, int velocity);
+	void handleNoteOff(int channel, int pitch, int velocity);
+	void handleControlChange(int channel, int number, int value);
+	void handleProgramChange(int channel, int value);
+	void handleSysEx(const MidiMessage& msg);
+	void handleFullFrameTimecode(const MidiMessage& msg);
+	void handlePitchWheel(int channel, int value);
+	void handleChannelPressure(int channel, int value);
+	void handleAfterTouch(int channel, int note, int value);
+	void handleThru(const MidiMessage& msg);
+	void handleMidiStart();
+	void handleMidiStop();
+	void handleMidiContinue();
+	void handleMidiMachineControlCommand(MidiMessage::MidiMachineControlCommand type);
+	void handleMidiMachineControlGoto(int hours, int minutes, int seconds, int frames);
+
+	class InputQueue :
+		public AsyncUpdater
+	{
+	public:
+		InputQueue(MIDIModule& m) : module(m) {}
+		MIDIModule& module;
+		void handleAsyncUpdate() override { module.handleQueuedInput(); }
+	};
+	CriticalSection inputQueueLock;
+	std::deque<MidiMessage> inputQueue;
+	int droppedInput = 0;
+	uint32 lastDropLog = 0;
+	InputQueue inputQueueUpdater;
+
+	//Sends come from any thread (a sequence's play thread, a script, the message thread) and the message thread replaces
+	//outputDevice : every send holds this while it uses the pointer, so MIDIManager can delete an unplugged device once
+	//the module has let go of it
+	CriticalSection outputLock;
+	bool withOutput(std::function<void(MIDIOutputDevice*)> f);
+
+	//Note offs a Full Note still owes. The module keeps them, not the command : they go out even when the command is
+	//deleted (a reload, an edit), and all at once, before the output closes, when the module is disabled, changes device
+	//or is removed. Several notes can be held at once (different pitches, or a multiplexed command).
+	struct PendingNoteOff
+	{
+		int channel;
+		int pitch;
+		double dueMs;
+	};
+	CriticalSection pendingNoteOffLock;
+	Array<PendingNoteOff> pendingNoteOffs;
+	class NoteOffTimer :
+		public HighResolutionTimer
+	{
+	public:
+		NoteOffTimer(MIDIModule& m) : module(m) {}
+		~NoteOffTimer() { stopTimer(); }
+		MIDIModule& module;
+		void hiResTimerCallback() override { module.sendPendingNoteOffs(false); }
+	};
+	NoteOffTimer noteOffTimer;
+	void scheduleNoteOff(int channel, int pitch, double delayMs);
+	void sendPendingNoteOffs(bool all);
 
 	virtual void mtcStarted() override;
 	virtual void mtcStopped() override;

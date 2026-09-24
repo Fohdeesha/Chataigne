@@ -184,6 +184,11 @@ void AudioModule::updateAudioSetup()
 	currentSampleRate = setup.sampleRate;
 	currentBufferSize = setup.bufferSize;
 
+	appliedSetup = setup;
+	appliedDeviceType = am.getCurrentAudioDeviceType();
+	appliedHadDevice = am.getCurrentAudioDevice() != nullptr;
+	hasAppliedSetup = true;
+
 	setPlayerActive(false);
 	am.removeAudioCallback(this);
 
@@ -365,6 +370,8 @@ void AudioModule::loadJSONDataInternal(var data)
 
 		std::unique_ptr<XmlElement> elem = XmlDocument::parse(data.getProperty("audioSettings", ""));
 		am.initialise(0, 2, elem.get(), true);
+		if (std::unique_ptr<XmlElement> wanted = am.createStateXml()) wantedDeviceWasListed = isWantedDeviceListed(*wanted);
+		updateDeviceWarning();
 	}
 
 	updateAudioSetup();
@@ -543,7 +550,114 @@ void AudioModule::timerCallback()
 
 void AudioModule::changeListenerCallback(ChangeBroadcaster*)
 {
+	//The device manager also broadcasts every change of the system's device lists (a monitor waking, a USB or Bluetooth
+	//device, a MIDI port) : rebuilding for those silenced the output, recreated the gain and monitor parameters and left
+	//playing clips late against the timeline. Only a change of the setup in use rebuilds.
+	tryRestoreWantedDevice();
+	updateDeviceWarning();
+	if (!audioSetupDiffersFromApplied()) return;
 	updateAudioSetup();
+}
+
+bool AudioModule::audioSetupDiffersFromApplied()
+{
+	if (!hasAppliedSetup) return true;
+
+	AudioDeviceManager::AudioDeviceSetup s;
+	am.getAudioDeviceSetup(s);
+
+	return am.getCurrentAudioDeviceType() != appliedDeviceType
+		|| (am.getCurrentAudioDevice() != nullptr) != appliedHadDevice
+		|| s.outputDeviceName != appliedSetup.outputDeviceName
+		|| s.inputDeviceName != appliedSetup.inputDeviceName
+		|| s.sampleRate != appliedSetup.sampleRate
+		|| s.bufferSize != appliedSetup.bufferSize
+		|| s.inputChannels != appliedSetup.inputChannels
+		|| s.outputChannels != appliedSetup.outputChannels
+		|| s.useDefaultInputChannels != appliedSetup.useDefaultInputChannels
+		|| s.useDefaultOutputChannels != appliedSetup.useDefaultOutputChannels;
+}
+
+void AudioModule::getWantedNames(const XmlElement& wanted, String& type, String& in, String& out)
+{
+	type = wanted.getStringAttribute("deviceType");
+	in = wanted.getStringAttribute("audioInputDeviceName");
+	out = wanted.getStringAttribute("audioOutputDeviceName");
+	if (wanted.getStringAttribute("audioDeviceName").isNotEmpty()) in = out = wanted.getStringAttribute("audioDeviceName"); //older format
+}
+
+bool AudioModule::isWantedDeviceInUse(const XmlElement& wanted)
+{
+	String type, in, out;
+	getWantedNames(wanted, type, in, out);
+	if (in.isEmpty() && out.isEmpty()) return true; //nothing asked for
+
+	AudioDeviceManager::AudioDeviceSetup s;
+	am.getAudioDeviceSetup(s);
+	return am.getCurrentAudioDevice() != nullptr
+		&& (type.isEmpty() || am.getCurrentAudioDeviceType() == type)
+		&& (in.isEmpty() || s.inputDeviceName.trim().equalsIgnoreCase(in.trim()))
+		&& (out.isEmpty() || s.outputDeviceName.trim().equalsIgnoreCase(out.trim()));
+}
+
+bool AudioModule::isWantedDeviceListed(const XmlElement& wanted)
+{
+	String type, in, out;
+	getWantedNames(wanted, type, in, out);
+	if (in.isEmpty() && out.isEmpty()) return true;
+
+	auto contains = [](const StringArray& names, const String& name)
+	{
+		for (auto& n : names) if (n.trim().equalsIgnoreCase(name.trim())) return true;
+		return false;
+	};
+
+	for (auto* t : am.getAvailableDeviceTypes())
+	{
+		if (type.isNotEmpty() && t->getTypeName() != type) continue;
+		if ((in.isEmpty() || contains(t->getDeviceNames(true), in)) && (out.isEmpty() || contains(t->getDeviceNames(false), out))) return true;
+	}
+	return false;
+}
+
+void AudioModule::updateDeviceWarning()
+{
+	std::unique_ptr<XmlElement> wanted = am.createStateXml();
+	if (wanted == nullptr || isWantedDeviceInUse(*wanted))
+	{
+		if (wantedDeviceMissing) NLOG(niceName, "The audio device the project asks for is in use again");
+		wantedDeviceMissing = false;
+		clearWarning("device");
+		return;
+	}
+
+	//initialise() falls back to another device without a word : say so
+	String type, in, out;
+	getWantedNames(*wanted, type, in, out);
+	AudioDeviceManager::AudioDeviceSetup s;
+	am.getAudioDeviceSetup(s);
+	const String using_ = am.getCurrentAudioDevice() == nullptr ? String() : (s.outputDeviceName.isNotEmpty() ? s.outputDeviceName : s.inputDeviceName);
+	const String msg = "The audio device \"" + (out.isNotEmpty() ? out : in) + "\" is not available" + (using_.isNotEmpty() ? ", using \"" + using_ + "\" until it is back" : ", no audio until it is back");
+	setWarningMessage(msg, "device", false); //logged below, once per disappearance (it logs nothing while a project loads)
+	if (!wantedDeviceMissing) NLOGWARNING(niceName, msg);
+	wantedDeviceMissing = true;
+}
+
+void AudioModule::tryRestoreWantedDevice()
+{
+	std::unique_ptr<XmlElement> wanted = am.createStateXml();
+	if (wanted == nullptr) return;
+
+	//Only when the device newly appears in the list : a device that is listed but will not open (held by another
+	//program) would otherwise be retried on every broadcast, and each attempt broadcasts again
+	const bool listed = isWantedDeviceListed(*wanted);
+	const bool appeared = listed && !wantedDeviceWasListed;
+	wantedDeviceWasListed = listed;
+	if (!appeared || isWantedDeviceInUse(*wanted)) return;
+
+	//What the device manager itself does when the device in use disappears : the wanted device, else the default one.
+	//Never without the fallback : a failed open closes the device in use, and the module would be left with none.
+	am.initialise(0, 2, wanted.get(), true);
 }
 
 void AudioModule::itemAdded(FFTAnalyzer* item)
