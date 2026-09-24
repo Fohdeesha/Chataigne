@@ -73,7 +73,7 @@ struct icmphdr
 #endif 
 #endif // PING_SUPPORT
 
-float OSModule::timeAtProcessStart = Time::getMillisecondCounter() / 1000.0f;
+double OSModule::timeAtProcessStart = Time::getMillisecondCounterHiRes() / 1000.0; //not the 32-bit counter : it wraps every 49.7 days
 
 OSModule::OSModule() :
 	Module(getDefaultTypeString()),
@@ -707,8 +707,10 @@ void OSModule::OSThread::run()
 	{
 		wait(1000);
 		
-		osModule->osUpTime->setValue((int)(Time::getMillisecondCounter() / 1000.0f));
-		osModule->processUpTime->setValue((int)(osModule->osUpTime->floatValue() - OSModule::timeAtProcessStart));
+		//the high-resolution counter (since boot) : the 32-bit one wrapped after 49.7 days, and the process time went negative
+		const double now = Time::getMillisecondCounterHiRes() / 1000.0;
+		osModule->osUpTime->setValue((int)now);
+		osModule->processUpTime->setValue((int)(now - OSModule::timeAtProcessStart));
 
 
 		float usage = OSSystemInfo::getSystemCPUUsage();

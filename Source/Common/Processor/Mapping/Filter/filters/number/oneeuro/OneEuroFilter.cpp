@@ -39,6 +39,10 @@ float OneEuroFilter::alpha(float cutoff)
 
 Array<float> OneEuroFilter::filter(Array<float> oldValues, Array<float> newValues, double deltaTime)
 {
+	//no time has passed : nothing to filter. 1 / 0 made the frequency infinite, an unchanged value then gave 0 * inf = NaN,
+	//and the NaN stayed in the filter's state, so the output was stuck from then on
+	if (!(deltaTime > 0)) return oldValues;
+
 	freq = 1.0 / deltaTime;
 
 	Array<float> result;

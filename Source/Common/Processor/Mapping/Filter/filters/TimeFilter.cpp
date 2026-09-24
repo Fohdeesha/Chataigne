@@ -11,10 +11,12 @@
 TimeFilter::TimeFilter(StringRef name, var params, Multiplex* multiplex) :
 	MappingFilter(name, params, multiplex, true)
 {
+	//The high-resolution counter : the millisecond one wraps every 49.7 days, and two updates within one millisecond read
+	//an interval of 0. Filled after the resize : filled before, the start times stayed at 0 and the first interval was
+	//the machine's uptime.
 	deltaTimes.resize(getMultiplexCount());
-	for (int i = 0; i < timesAtLastUpdate.size(); i++) timesAtLastUpdate.set(i, Time::getMillisecondCounter() / 1000.0);
-
 	timesAtLastUpdate.resize(getMultiplexCount());
+	timesAtLastUpdate.fill(Time::getMillisecondCounterHiRes() / 1000.0);
 	deltaTimes.fill(0);
 }
 
@@ -25,15 +27,14 @@ TimeFilter::~TimeFilter()
 void TimeFilter::multiplexCountChanged()
 {
 	deltaTimes.resize(getMultiplexCount());
-	for (int i = 0; i < timesAtLastUpdate.size(); i++) timesAtLastUpdate.set(i, Time::getMillisecondCounter() / 1000.0);
-
 	timesAtLastUpdate.resize(getMultiplexCount());
+	timesAtLastUpdate.fill(Time::getMillisecondCounterHiRes() / 1000.0);
 	deltaTimes.fill(0);
 }
 
 MappingFilter::ProcessResult TimeFilter::processInternal(Array<Parameter*> sources, int multiplexIndex)
 {
-	double curTime = Time::getMillisecondCounter() / 1000.0;
+	double curTime = Time::getMillisecondCounterHiRes() / 1000.0;
 	double lastUpdate = timesAtLastUpdate.size() > multiplexIndex ? timesAtLastUpdate.getUnchecked(multiplexIndex) : curTime;
 	deltaTimes.set(multiplexIndex, jmax<double>(curTime - lastUpdate, 0));
 

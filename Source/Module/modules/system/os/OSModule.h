@@ -49,7 +49,7 @@ public:
 	ControllableContainer pingIPsCC;
 	ControllableContainer pingStatusCC;
 
-	static float timeAtProcessStart;
+	static double timeAtProcessStart;
 
 	//Script
 	const Identifier launchAppId = "launchApp";
