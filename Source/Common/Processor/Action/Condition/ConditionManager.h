@@ -42,6 +42,7 @@ public:
 
 	//sameSource sync check to avoid parameterListener order bug when 2 conditions have the same source but different operators
 	bool isCheckingOtherConditionsWithSameSource;
+	juce::Array<Condition*> deferredConditionChanges;
 
 	void multiplexCountChanged() override;
 	void multiplexPreviewIndexChanged() override;

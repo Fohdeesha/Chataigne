@@ -479,7 +479,7 @@ var ToStringFilter::convertValue(Parameter* source, var sourceValue, int multipl
 				for (int i = 0; i < sv.size(); i++) result += String(i >= 0 ? "," : "") + sv[i].toString();
 				result += "]";
 			}
-			else if (sv.isDouble() || sv.isInt() || sv.isInt64())
+			else if (sv.isDouble() || sv.isInt() || sv.isInt64() || sv.isBool()) //a bool is 1 or 0 (it came out empty)
 			{
 				Format f = format->getValueDataAsEnum<Format>();
 				switch (f)

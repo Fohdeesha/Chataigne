@@ -26,6 +26,7 @@ ConditionManager::ConditionManager(Multiplex* multiplex) :
 	isValids.resize(getMultiplexCount());
 	validationProgresses.resize(getMultiplexCount());
 	validationTargets.resize(getMultiplexCount());
+	prevTimerTimes.resize(getMultiplexCount()); //never sized : set() on index 1+ appended, and index 1+ read 0 back
 
 	isValids.fill(false);
 	validationProgresses.fill(0);
@@ -75,6 +76,7 @@ void ConditionManager::multiplexCountChanged()
 	validationProgresses.resize(getMultiplexCount());
 	validationTargets.resize(getMultiplexCount());
 	sequentialConditionIndices.resize(getMultiplexCount());
+	prevTimerTimes.resize(getMultiplexCount());
 
 	isValids.fill(false);
 	validationProgresses.fill(0);
@@ -279,7 +281,14 @@ void ConditionManager::checkAllConditions(int multiplexIndex, bool emptyIsValid,
 
 void ConditionManager::conditionValidationChanged(Condition* c, int multiplexIndex, bool dispatchOnChangeOnly)
 {
-	if (isCheckingOtherConditionsWithSameSource) return;
+	if (isCheckingOtherConditionsWithSameSource)
+	{
+		//another condition on the same source changed while it was re-checked below. A real change is handled right after
+		//this one's : it was dropped, and its own listener then saw no change, so a sequential step on the same source was
+		//lost. An Always Trigger repeat (dispatchOnChangeOnly false) is not deferred : its own listener sends it again.
+		if (dispatchOnChangeOnly) deferredConditionChanges.addIfNotAlreadyThere(c);
+		return;
+	}
 
 	if (StandardCondition* sc = dynamic_cast<StandardCondition*>(c))
 	{
@@ -296,6 +305,13 @@ void ConditionManager::conditionValidationChanged(Condition* c, int multiplexInd
 	}
 
 	checkAllConditions(multiplexIndex, false, dispatchOnChangeOnly, items.indexOf(c));
+
+	Array<Condition*> others;
+	others.swapWith(deferredConditionChanges);
+	for (auto& o : others)
+	{
+		if (items.contains(o)) checkAllConditions(multiplexIndex, false, true, items.indexOf(o)); //AND / OR : already counted, a no-op
+	}
 }
 
 void ConditionManager::onContainerParameterChanged(Parameter* p)

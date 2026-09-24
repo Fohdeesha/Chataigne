@@ -234,6 +234,7 @@ MappingFilter::ProcessResult  MappingFilter::processInternal(Array<Parameter*> i
 
 		if (!isTypeEligible)
 		{
+			if (!fParam->checkValueIsTheSame(fParam->getValue(), inputs[i]->getValue())) result = CHANGED; //a pass-through that changed is a change
 			fParam->setValue(inputs[i]->getValue()); //direct transfer if not supposed to be taken
 			continue;
 		}
@@ -249,7 +250,7 @@ MappingFilter::ProcessResult  MappingFilter::processInternal(Array<Parameter*> i
 
 		if (!channelEligible)
 		{
-			if (fParam->checkValueIsTheSame(fParam->getValue(), inputs[i]->getValue())) result = CHANGED;
+			if (!fParam->checkValueIsTheSame(fParam->getValue(), inputs[i]->getValue())) result = CHANGED; //was inverted : CHANGED when it did not change
 			fParam->setValue(inputs[i]->getValue()); //direct transfer if not supposed to be taken, but after setting range
 			continue;
 		}

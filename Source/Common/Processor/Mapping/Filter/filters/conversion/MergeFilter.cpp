@@ -76,7 +76,7 @@ MappingFilter::ProcessResult MergeFilter::processInternal(Array<Parameter*> inpu
 
 		for (int i = 0; i < inputs.size(); i++)
 		{
-			if (i == 0 && (o == DIFF || o == DISTANCE)) continue;
+			if (i == 0 && o == DIFF) continue; //Distance needs input 0 in its min and max too
 
 			switch (o)
 			{
@@ -107,8 +107,9 @@ MappingFilter::ProcessResult MergeFilter::processInternal(Array<Parameter*> inpu
 		var maxVals;
 		for (int i = 0; i < fp->value.size(); i++)
 		{
-			minVals.append((float)INT32_MIN);
-			maxVals.append((float)INT32_MAX);
+			//the seeds were swapped (min from INT32_MIN, max from INT32_MAX) : Distance came out as ~4.29e9
+			minVals.append((float)INT32_MAX);
+			maxVals.append((float)INT32_MIN);
 
 			if (o == SUM || o == AVERAGE) vals.append(0);
 			else if (o == MIN) vals.append((float)INT32_MAX);
@@ -119,7 +120,7 @@ MappingFilter::ProcessResult MergeFilter::processInternal(Array<Parameter*> inpu
 
 		for (int i = 0; i < inputs.size(); i++)
 		{
-			if (i == 0 && (o == DIFF || o == DISTANCE)) continue;
+			if (i == 0 && o == DIFF) continue;
 
 			Parameter* in = inputs[i];
 			for (int j = 0; j < in->value.size() && j < vals.size(); j++)
