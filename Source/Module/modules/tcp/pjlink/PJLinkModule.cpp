@@ -175,8 +175,7 @@ void PJLinkModule::onControllableFeedbackUpdateInternal(ControllableContainer* c
 			if (c == client->updateInput)
 			{
 				sendMessageToClient("%1INPT ?", client->id);
-				wait(500);
-				sendMessageToClient("%2IRES ?", client->id);
+				queueRequest("%2IRES ?", client->id, 500);
 			}
 
 			if (c == client->updateInfo) requestInfos();
@@ -322,6 +321,8 @@ void PJLinkModule::run()
 void PJLinkModule::clearItem()
 {
 	stopTimer();
+	requestTimer.stopTimer();
+	timedRequests.clear();
 	stopThread(1000);
 	for (auto& c : clients) c->stopThread(1000); //their connect threads set this module's values
 	StreamingModule::clearItem();
@@ -329,32 +330,59 @@ void PJLinkModule::clearItem()
 
 void PJLinkModule::requestInfos()
 {
+	static const char* requests[] = {
+		"%1INST ?",		// input list
+		"%2IRES ?",		// Input resolution
+		"%2RRES ?",		// Recommended resolution
+		"%1INF1 ?",		// Manufacturer name
+		"%1INF2 ?",		// Product name
+		"%1NAME ?",		// Display name
+		"%2SVER ?",		// Firmware version
+		"%1LAMP ?",		// Lamp hours
+		"%2RLMP ?",		// Lamp model
+		"%2FILT ?",		// Filter time
+		"%2RFIL ?",		// Filter number
+		"%1ERST ?"		// chek errors
+	};
+
+	//100 ms apart, projector after projector, as the waits spaced them
+	int delay = 0;
 	for (int i = 1; i <= clients.size(); i++)
 	{
-		sendMessageToClient("%1INST ?", i);		// input list
-		wait(100);
-		sendMessageToClient("%2IRES ?", i);		// Input resolution
-		wait(100);
-		sendMessageToClient("%2RRES ?", i);		// Recommended resolution
-		wait(100);
-		sendMessageToClient("%1INF1 ?", i);		// Manufacturer name
-		wait(100);
-		sendMessageToClient("%1INF2 ?", i);		// Product name
-		wait(100);
-		sendMessageToClient("%1NAME ?", i);		// Display name
-		wait(100);
-		sendMessageToClient("%2SVER ?", i);		// Firmware version
-		wait(100);
-		sendMessageToClient("%1LAMP ?", i);		// Lamp hours
-		wait(100);
-		sendMessageToClient("%2RLMP ?", i);		// Lamp model
-		wait(100);
-		sendMessageToClient("%2FILT ?", i);		// Filter time
-		wait(100);
-		sendMessageToClient("%2RFIL ?", i);		// Filter number
-		wait(100);
-		sendMessageToClient("%1ERST ?", i);		// chek errors
+		for (auto r : requests)
+		{
+			queueRequest(r, i, delay);
+			delay += 100;
+		}
 	}
+}
+
+void PJLinkModule::queueRequest(const String& message, int clientId, int delayMs)
+{
+	TimedRequest r;
+	r.message = message;
+	r.clientId = clientId;
+	r.dueMs = Time::getMillisecondCounter() + (uint32)delayMs;
+
+	int index = timedRequests.size();
+	while (index > 0 && (int32)(timedRequests.getReference(index - 1).dueMs - r.dueMs) > 0) index--; //wrap-safe order
+	timedRequests.insert(index, r);
+
+	if (!requestTimer.isTimerRunning()) requestTimer.startTimer(20);
+}
+
+void PJLinkModule::sendDueRequests()
+{
+	const uint32 now = Time::getMillisecondCounter();
+	while (timedRequests.size() > 0)
+	{
+		const TimedRequest r = timedRequests.getReference(0);
+		if ((int32)(now - r.dueMs) < 0) break; //not due yet
+		timedRequests.remove(0);
+		sendMessageToClient(r.message, r.clientId); //a projector removed since is skipped there
+	}
+
+	if (timedRequests.isEmpty()) requestTimer.stopTimer();
 }
 void PJLinkModule::processClient(PJLinkModule::PJLinkClient* c)
 {

@@ -30,12 +30,15 @@ void WakeOnLanCommandEditor::resizedInternalHeader(Rectangle<int>& r)
 
 void WakeOnLanCommandEditor::showMenuAndSetupMacAdddress()
 {
-	ZeroconfManager::getInstance()->showMenuAndGetService("Workstation", [this](ZeroconfManager::ServiceInfo* service)
+	//the command, not this editor : the Inspector can rebuild (and delete this editor) while the menu is open
+	WeakReference<Inspectable> weakCommand(wolCommand);
+	ZeroconfManager::getInstance()->showMenuAndGetService("Workstation", [weakCommand](ZeroconfManager::ServiceInfo* service)
 		{
-			if (service != nullptr)
+			WakeOnLanCommand* cmd = dynamic_cast<WakeOnLanCommand*>(weakCommand.get());
+			if (service != nullptr && cmd != nullptr)
 			{
 				String s = service->name.substring(service->name.indexOf("[") + 1, service->name.indexOf("]"));
-				wolCommand->macAddress->setValue(s);
+				cmd->macAddress->setValue(s);
 			}
 		}
 	);

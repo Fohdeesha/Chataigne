@@ -126,6 +126,29 @@ public:
 	void processClientLine(PJLinkClient* c, const String& message);
 
 	void requestInfos();
+
+	//Requests a projector takes one at a time, sent from a timer on the message thread at the same spacing. They were
+	//spaced with waits on the message thread, which froze the interface 0.5 s for Update Input and 1.1 s per projector
+	//for Update Informations.
+	struct TimedRequest
+	{
+		String message;
+		int clientId = -1;
+		uint32 dueMs = 0;
+	};
+	Array<TimedRequest> timedRequests; //message thread only, in due order
+	void queueRequest(const String& message, int clientId, int delayMs);
+	void sendDueRequests();
+
+	class RequestTimer :
+		public Timer
+	{
+	public:
+		RequestTimer(PJLinkModule& m) : module(m) {}
+		PJLinkModule& module;
+		void timerCallback() override { module.sendDueRequests(); }
+	};
+	RequestTimer requestTimer{ *this };
 	void requestInputName(int id);
 
 

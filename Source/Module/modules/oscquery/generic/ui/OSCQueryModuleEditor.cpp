@@ -30,11 +30,14 @@ void OSCQueryModuleOutputEditor::resizedInternalHeader(Rectangle<int>& r)
 
 void OSCQueryModuleOutputEditor::showMenuAndSetupOutput()
 {
-	ZeroconfManager::getInstance()->showMenuAndGetService("OSCQuery", [this](ZeroconfManager::ServiceInfo* service)
+	//the output container, not this editor : the Inspector can rebuild (and delete this editor) while the menu is open
+	WeakReference<Inspectable> weakOutput(container.get());
+	ZeroconfManager::getInstance()->showMenuAndGetService("OSCQuery", [weakOutput](ZeroconfManager::ServiceInfo* service)
 		{
-			if (service != nullptr)
+			OSCQueryOutput* output = dynamic_cast<OSCQueryOutput*>(weakOutput.get());
+			if (service != nullptr && output != nullptr)
 			{
-				GenericOSCQueryModule* o = ((OSCQueryOutput*)container.get())->module;
+				GenericOSCQueryModule* o = output->module;
 				bool isSame = o->useLocal->boolValue() == service->isLocal
 					&& o->remoteHost->stringValue() == service->getIP()
 					&& o->remotePort->intValue() == service->port;

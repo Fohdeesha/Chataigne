@@ -106,7 +106,26 @@ public:
 
 	void run() override;
 
-	void stopClient();
+	void stopClient(); //stops and joins the thread : only where the module goes away
+	void stopClientNoWait();
+
+	//A setting changed : the thread may be inside connect(), which blocks until the broker answers or the system gives
+	//up (21 s for an address that never answers), and waiting for it froze the interface that long. The thread is told
+	//to stop, and started again once it has left.
+	void restartClient();
+	void checkRestart();
+	class RestartTimer :
+		public Timer
+	{
+	public:
+		RestartTimer(MQTTClientModule& m) : module(m) {}
+		MQTTClientModule& module;
+		void timerCallback() override { module.checkRestart(); }
+	};
+	RestartTimer restartTimer{ *this };
+	uint32 restartAskedAt = 0;
+	bool restartLogged = false;
+
 	bool shouldLogPublishWarning();
 	String resolveClientId() const;
 

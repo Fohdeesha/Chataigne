@@ -108,10 +108,11 @@ void MQTTClientModule::onContainerParameterChangedInternal(Parameter* p)
 	Module::onContainerParameterChangedInternal(p);
 	if (p == enabled)
 	{
-		if (enabled->boolValue()) startThread();
+		if (enabled->boolValue()) restartClient();
 		else
 		{
-			stopClient();
+			restartTimer.stopTimer();
+			stopClientNoWait();
 		}
 	}
 }
@@ -124,8 +125,7 @@ void MQTTClientModule::onControllableFeedbackUpdateInternal(ControllableContaine
 	{
 		if (c == host || c == port || c == keepAlive || c == authenticationCC.enabled || c == username || c == pass || c == clientId)
 		{
-			stopClient();
-			if (enabled->boolValue()) startThread();
+			restartClient();
 		}
 
 		if (dynamic_cast<MQTTTopic*>(c->parentContainer.get()) != nullptr || c == protocol)
@@ -140,6 +140,26 @@ void MQTTClientModule::onControllableFeedbackUpdateInternal(ControllableContaine
 	}
 }
 
+
+//mosquittoLock is held by the module's thread through connect(), which blocks until the broker answers or the system
+//gives up (21 s for an address that never answers). Other threads wait for it a little and then give up : a publish or a
+//subscription made then would fail anyway (not connected), and on_connect() subscribes every topic again.
+struct MQTTLockAttempt
+{
+	MQTTLockAttempt(CriticalSection& l, int timeoutMs) : lock(l)
+	{
+		const uint32 start = Time::getMillisecondCounter();
+		for (;;)
+		{
+			locked = lock.tryEnter();
+			if (locked || Time::getMillisecondCounter() - start >= (uint32)timeoutMs) break;
+			Thread::sleep(1);
+		}
+	}
+	~MQTTLockAttempt() { if (locked) lock.exit(); }
+	CriticalSection& lock;
+	bool locked = false;
+};
 
 void MQTTClientModule::publishMessage(const String& topic, const String& message)
 {
@@ -157,7 +177,12 @@ void MQTTClientModule::publishMessage(const String& topic, const String& message
 
 	int result = 0;
 	{
-		GenericScopedLock lock(mosquittoLock);
+		MQTTLockAttempt lock(mosquittoLock, 50);
+		if (!lock.locked)
+		{
+			if (shouldLogPublishWarning()) NLOGWARNING(niceName, "Connecting again, not sending");
+			return;
+		}
 		result = publish(nullptr, topicUTF8.c_str(), static_cast<int>(messageUTF8.size()), messageUTF8.data(), 2);
 	}
 
@@ -201,9 +226,10 @@ void MQTTClientModule::itemRemoved(MQTTTopic* item)
 	if (isCurrentlyLoadingData) return;
 
 #ifdef MOSQUITTO_SUPPORTED
+	if (isConnected->boolValue()) //not connected : nothing to unsubscribe, and on_connect() subscribes the remaining topics
 	{
-		GenericScopedLock mosqLock(mosquittoLock);
-		unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
+		MQTTLockAttempt mosqLock(mosquittoLock, 50);
+		if (mosqLock.locked) unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
 	}
 #endif
 	updateTopicSubs();
@@ -218,8 +244,9 @@ void MQTTClientModule::itemsRemoved(Array<MQTTTopic*> items)
 		//Scoped, like itemRemoved() : holding mosquittoLock across updateTopicSubs() would take
 		//mosquittoLock -> updateTopicLock, the reverse of the order used by updateTopicSubs() and
 		//on_connect(), and removing several topics while the network thread subscribes deadlocked.
-		GenericScopedLock mosqLock(mosquittoLock);
-		for (auto& item : items) unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
+		MQTTLockAttempt mosqLock(mosquittoLock, 50);
+		if (mosqLock.locked && isConnected->boolValue())
+			for (auto& item : items) unsubscribe(&item->mid, item->topic->stringValue().toStdString().c_str());
 	}
 #endif
 	updateTopicSubs();
@@ -272,9 +299,10 @@ void MQTTClientModule::updateTopicSubs()
 		}
 
 #ifdef MOSQUITTO_SUPPORTED
+		if (isConnected->boolValue()) //not connected : on_connect() subscribes every topic
 		{
-			GenericScopedLock mosqLock(mosquittoLock);
-			subscribe(&topic->mid, s.toStdString().c_str());
+			MQTTLockAttempt mosqLock(mosquittoLock, 50);
+			if (mosqLock.locked) subscribe(&topic->mid, s.toStdString().c_str());
 		}
 #endif
 		topicItemMap.set(s, topic);
@@ -514,6 +542,40 @@ void MQTTClientModule::run()
 
 void MQTTClientModule::stopClient()
 {
+	restartTimer.stopTimer();
+	stopClientNoWait();
+
+	//Longer than the system's connect timeout (21 s for an address that never answers) : after 5 s JUCE killed the thread
+	//inside connect(), which left mosquittoLock held for good. Only the module going away waits here now.
+	stopThread(30000);
+}
+
+void MQTTClientModule::restartClient()
+{
+	stopClientNoWait();
+	restartAskedAt = Time::getMillisecondCounter();
+	restartLogged = false;
+	restartTimer.startTimer(50);
+}
+
+void MQTTClientModule::checkRestart()
+{
+	if (isThreadRunning())
+	{
+		if (!restartLogged && Time::getMillisecondCounter() - restartAskedAt > 2000)
+		{
+			restartLogged = true;
+			NLOG(niceName, "Waiting for the connection attempt to " << host->stringValue() << " to give up before applying the new settings");
+		}
+		return;
+	}
+
+	restartTimer.stopTimer();
+	if (enabled->boolValue() && !isClearing) startThread();
+}
+
+void MQTTClientModule::stopClientNoWait()
+{
 	signalThreadShouldExit();
 	notify();
 
@@ -526,10 +588,6 @@ void MQTTClientModule::stopClient()
 	}
 	isConnected->setValue(false);
 #endif
-
-	//Longer than that system timeout : after 5 s JUCE killed the thread inside connect(), which left mosquittoLock
-	//held for good, and every publish, subscription and later stop then waited on it forever
-	stopThread(30000);
 }
 
 /**
@@ -599,7 +657,8 @@ void MQTTClientModule::on_connect(int rc)
 void MQTTClientModule::resubscribeAll()
 {
 	GenericScopedLock lock(updateTopicLock);
-	GenericScopedLock mosqLock(mosquittoLock); //same order as updateTopicSubs() : updateTopicLock first
+	MQTTLockAttempt mosqLock(mosquittoLock, 50); //same order as updateTopicSubs() : updateTopicLock first
+	if (!mosqLock.locked) return; //the thread is connecting again : its next on_connect() posts this again
 	for (auto& t : topicsManager.items)
 	{
 		String topic = t->topic->stringValue();

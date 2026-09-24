@@ -27,11 +27,13 @@ void OSCOutputEditor::resizedInternalHeaderItemInternal(Rectangle<int>& r)
 
 void OSCOutputEditor::showMenuAndSetupOutput()
 {
-	ZeroconfManager::getInstance()->showMenuAndGetService("OSC", [this](ZeroconfManager::ServiceInfo* service)
+	//the output, not this editor : the Inspector can rebuild (and delete this editor) while the menu is open
+	WeakReference<Inspectable> weakOutput(item);
+	ZeroconfManager::getInstance()->showMenuAndGetService("OSC", [weakOutput](ZeroconfManager::ServiceInfo* service)
 		{
-			if (service != nullptr)
+			OSCOutput* o = dynamic_cast<OSCOutput*>(weakOutput.get());
+			if (service != nullptr && o != nullptr)
 			{
-				OSCOutput* o = (OSCOutput*)item;
 				o->useLocal->setValue(service->isLocal);
 				o->remoteHost->setValue(service->getIP());
 				o->remotePort->setValue(service->port);
