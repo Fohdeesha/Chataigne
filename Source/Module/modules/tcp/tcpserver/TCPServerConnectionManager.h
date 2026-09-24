@@ -23,6 +23,12 @@ public:
 	String addressToBind;
 
 	void setupReceiver(int port, const String& address);
+
+	//The reading thread and a sending thread (message thread, a sequence's play thread, a script) can find the same
+	//client dead, and both removed and deleted it. A client is now taken out of the list under the list's lock, by one
+	//of them only (detachConnection returns false to the others), then closed and deleted by that one.
+	bool detachConnection(StreamingSocket* connection);
+	void finishConnection(StreamingSocket* connection);
 	void removeConnection(StreamingSocket* connection);
 
 	void close();
@@ -36,7 +42,10 @@ public:
 		virtual void connectionRemoved(StreamingSocket *) {}
 	};
 
-	ListenerList<ConnectionManagerListener> connectionManagerListeners;
+	//Locked : the accepting thread (a new client), the reading thread and any sending thread (a client removed) call it
+	//at once, and an unlocked ListenerList keeps its iteration state in a shared vector : it was corrupted, and the
+	//destructor then crashed walking it. No callback waits for another thread, so holding it through a call is safe.
+	ListenerList<ConnectionManagerListener, Array<ConnectionManagerListener*, CriticalSection>> connectionManagerListeners;
 	void addConnectionManagerListener(ConnectionManagerListener* newListener) { connectionManagerListeners.add(newListener); }
 	void removeConnectionManagerListener(ConnectionManagerListener* listener) { connectionManagerListeners.remove(listener); }
 

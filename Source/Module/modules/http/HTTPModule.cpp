@@ -105,66 +105,90 @@ void HTTPModule::processRequest(Request* request)
 	if (stream != nullptr)
 	{
 		String content = stream->readEntireStreamAsString();
-		if (logIncomingData->boolValue()) NLOG(niceName, "Request status code : " << statusCode << ", content :\n" << content);
-
-		inActivityTrigger->trigger();
-		Array<var> args;
-
 		ResultDataType rt = request->resultDataType == DEFAULT ? protocol->getValueDataAsEnum<ResultDataType>() : request->resultDataType;
 
-		switch (rt)
-		{
-		case RAW:
-			args.add(content);
-			break;
+		//parsed here, off the message thread ; the values and the script on the message thread (they were created and run
+		//on this thread, racing the interface and a project load)
+		var data;
+		std::shared_ptr<XmlElement> doc;
+		if (rt == JSON) data = JSON::parse(content);
+		else if (rt == XML && autoAdd->boolValue()) doc.reset(XmlDocument::parse(content).release());
 
-		case JSON:
-		{
-			var data = JSON::parse(content);
-			if (data.isObject() || data.isArray())
+		String url = request->url.toString(true);
+		WeakReference<Inspectable> self(this);
+		MessageManager::callAsync([self, this, statusCode, content, rt, data, doc, url]()
 			{
-				args.add(data);
-				if (autoAdd->boolValue()) ControllableParser::createControllablesFromJSONObject(data, &valuesCC);
-			}
-			else
-			{
-				args.add(content);
-				NLOGERROR(niceName, "Error parsing JSON content, data is badly formatted");
-			}
-		}
-		break;
-
-		case XML:
-		{
-			if (autoAdd->boolValue())
-			{
-				std::unique_ptr<XmlElement> doc = XmlDocument::parse(content);
-				if (doc != nullptr)
-				{
-					createControllablesFromXMLResult(doc.get(), &valuesCC);
-				}
-				else
-				{
-					NLOGERROR(niceName, "Content is not legit XML !");
-				}
-			}
-
-			args.add(content);
-		}
-
-		break;
-
-		default:
-			break;
-		}
-
-		args.add(request->url.toString(true));
-		scriptManager->callFunctionOnAllItems(dataEventId, args);
+				if (self.wasObjectDeleted() || isClearing) return;
+				handleResponse(statusCode, content, rt, data, doc, url);
+			});
 	}
 	else
 	{
 		if (logIncomingData->boolValue()) NLOGWARNING(niceName, "Error with request, status code : " << statusCode << ", url : " << request->url.toString(true));
 	}
+}
+
+void HTTPModule::handleResponse(int statusCode, const String& content, ResultDataType rt, var data, std::shared_ptr<XmlElement> doc, const String& url)
+{
+	if (logIncomingData->boolValue()) NLOG(niceName, "Request status code : " << statusCode << ", content :\n" << content);
+
+	inActivityTrigger->trigger();
+	Array<var> args;
+
+	switch (rt)
+	{
+	case RAW:
+		args.add(content);
+		break;
+
+	case JSON:
+	{
+		if (data.isObject() || data.isArray())
+		{
+			args.add(data);
+			if (autoAdd->boolValue()) ControllableParser::createControllablesFromJSONObject(data, &valuesCC);
+		}
+		else
+		{
+			args.add(content);
+			NLOGERROR(niceName, "Error parsing JSON content, data is badly formatted");
+		}
+	}
+	break;
+
+	case XML:
+	{
+		if (autoAdd->boolValue())
+		{
+			if (doc != nullptr)
+			{
+				createControllablesFromXMLResult(doc.get(), &valuesCC);
+			}
+			else
+			{
+				NLOGERROR(niceName, "Content is not legit XML !");
+			}
+		}
+
+		args.add(content);
+	}
+
+	break;
+
+	default:
+		break;
+	}
+
+	args.add(url);
+	scriptManager->callFunctionOnAllItems(dataEventId, args);
+}
+
+void HTTPModule::clearItem()
+{
+	signalThreadShouldExit(); //a request in progress gives up at its next progress callback
+	notify();
+	stopThread(3000);
+	Module::clearItem();
 }
 
 bool HTTPModule::requestProgressCallback(int byteDownloaded, int bytesTotal)
@@ -382,7 +406,13 @@ void HTTPModule::run()
 		// Drain the queue atomically so requests added during processing remain queued.
 		requests.swapWith(tmpRequests);
 
-		for (auto& r : tmpRequests) processRequest(r);
+		for (auto& r : tmpRequests)
+		{
+			//the rest is dropped on a stop : each request can wait out its timeout (a server that went away), and with
+			//a queue behind it the stop gave up after 3 s and killed this thread in the middle of a request
+			if (threadShouldExit()) break;
+			processRequest(r);
+		}
 		wait(10);
 	}
 }

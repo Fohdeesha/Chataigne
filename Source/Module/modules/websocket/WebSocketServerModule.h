@@ -52,6 +52,7 @@ public:
 	void createControllablesFromJSONResult(var data, ControllableContainer* container);
 
 	void afterLoadJSONDataInternal() override;
+	void clearItem() override;
 
 	ModuleUI* getModuleUI() override;
 

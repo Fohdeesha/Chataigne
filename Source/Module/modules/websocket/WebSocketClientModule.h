@@ -54,6 +54,7 @@ public:
 	virtual void timerCallback() override;
 
 	void afterLoadJSONDataInternal() override;
+	void clearItem() override;
 
 	ModuleUI* getModuleUI() override;
 

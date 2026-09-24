@@ -312,8 +312,19 @@ void PJLinkModule::run()
 	while (!threadShouldExit())
 	{
 		wait(100);
+
+		//under the list's lock : changing Num Projectors deletes clients on the message thread while this walked the list
+		const ScopedLock sl(clients.getLock());
 		for (auto& c : clients) processClient(c);
 	}
+}
+
+void PJLinkModule::clearItem()
+{
+	stopTimer();
+	stopThread(1000);
+	for (auto& c : clients) c->stopThread(1000); //their connect threads set this module's values
+	StreamingModule::clearItem();
 }
 
 void PJLinkModule::requestInfos()
@@ -353,7 +364,8 @@ void PJLinkModule::processClient(PJLinkModule::PJLinkClient* c)
 	if (!c->paramsCC.enabled->boolValue()) return;
 
 	uint8 bytes[2048];
-	int numRead = c->client.read(bytes, 2048, false);
+	int numRead = c->client.read(bytes, 2048, false); //does not block : 0 when nothing arrived
+	if (numRead <= 0) return;
 
 	//if (numRead == 0)
 	//{
@@ -366,7 +378,24 @@ void PJLinkModule::processClient(PJLinkModule::PJLinkClient* c)
 		c->stringBuffer.append(String::fromUTF8((char*)bytes, numRead), numRead);
 		StringArray sa;
 		sa.addTokens(c->stringBuffer, "\r\n", "\"");
-		for (int i = 0; i < sa.size() - 1; ++i) processClientLine(c, sa[i]);
+		//the reply is handled on the message thread (it runs the script, rebuilds the input list, sends requests) : the
+		//client found again by its id, it may be gone by then
+		for (int i = 0; i < sa.size() - 1; ++i)
+		{
+			const int id = c->id;
+			const String line = sa[i];
+			runOnMessageThread([this, id, line]
+				{
+					for (auto& client : clients)
+					{
+						if (client->id == id)
+						{
+							processClientLine(client, line);
+							return;
+						}
+					}
+				});
+		}
 		c->stringBuffer = sa[sa.size() - 1];
 	}
 }

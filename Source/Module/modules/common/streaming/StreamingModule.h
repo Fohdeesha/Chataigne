@@ -50,6 +50,14 @@ public:
 	virtual void processDataJSON(const var& data);
 	virtual void processDataJSONInternal(const var& message) {}
 
+	//Received data arrives on a receive thread (the network module's, a serial port's, a web socket's). Handling it
+	//creates values, runs scripts and sends to other modules, which raced the interface and a project load : from another
+	//thread it is queued and handled on the message thread, in arrival order, like OSC and MIDI input. Every thread that
+	//can queue must be stopped in clearItem, before the module goes.
+	void runOnMessageThread(std::function<void()> f);
+	void handleQueuedInbound();
+	virtual void clearItem() override;
+
 	void createControllablesFromJSONResult(var data, ControllableContainer* container);
 
 	virtual void sendMessage(const String& message, var params = var());
@@ -96,4 +104,21 @@ public:
 	static Array<uint8> getByteFromArgs(const var::NativeFunctionArgs& a, int offset = 0);
 
 	virtual String getDefaultTypeString() const override { return "Streaming"; }
+
+private:
+	class InboundQueue :
+		public AsyncUpdater
+	{
+	public:
+		InboundQueue(StreamingModule& m) : module(m) {}
+		StreamingModule& module;
+		void handleAsyncUpdate() override { module.handleQueuedInbound(); }
+	};
+
+	CriticalSection inboundLock;
+	std::deque<std::function<void()>> inboundQueue;
+	int droppedInbound = 0;
+	uint32 lastInboundDropLog = 0;
+	bool inboundClosed = false;
+	InboundQueue inboundQueueUpdater;
 };

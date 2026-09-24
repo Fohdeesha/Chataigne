@@ -52,6 +52,8 @@ public:
 	virtual void portRemoved(SerialDevice *) override;
 	virtual void serialDataReceived(SerialDevice*, const var& data) override;
 
+	virtual void clearItem() override;
+
 	virtual var getJSONData(bool includeNonOverriden = false) override;
 	virtual void loadJSONDataInternal(var data) override;
 

@@ -103,7 +103,7 @@ public:
 			return false;
 		}
 
-		var list = JSON::parse(r.getBodyAsString());
+		var list = OpenHAB::parseJSON(r.getBodyAsString());
 		if (!list.isArray())
 		{
 			failure = "the item list is not a JSON array";
@@ -126,7 +126,7 @@ public:
 			return false;
 		}
 
-		var list = JSON::parse(r.getBodyAsString());
+		var list = OpenHAB::parseJSON(r.getBodyAsString());
 		if (!list.isArray())
 		{
 			failure = "the state list is not a JSON array";
@@ -155,7 +155,7 @@ public:
 			return false;
 		}
 
-		var info = JSON::parse(r.getBodyAsString());
+		var info = OpenHAB::parseJSON(r.getBodyAsString());
 		if (!info.isObject() || !info.hasProperty("version"))
 		{
 			failure = config.host + ":" + String(config.port) + " did not answer like openHAB's REST API";
@@ -256,7 +256,7 @@ public:
 		{
 			if (e.type != "message") continue;
 
-			var d = JSON::parse(e.data);
+			var d = OpenHAB::parseJSON(e.data);
 			if (!d.isObject()) continue;
 
 			OpenHAB::TopicParts t;
@@ -269,7 +269,7 @@ public:
 				if (t.action == "stateupdated") sawUpdatedEvent = true;
 				else if (useUpdatedEvents || sawUpdatedEvent) continue;
 
-				var p = JSON::parse(d.getProperty("payload", "").toString());
+				var p = OpenHAB::parseJSON(d.getProperty("payload", "").toString());
 				if (!p.isObject()) continue;
 
 				Inbound m;

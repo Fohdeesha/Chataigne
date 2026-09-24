@@ -259,7 +259,7 @@ namespace OpenHAB
 		String msg = getBodyAsString().trim();
 		if (msg.startsWithChar('{'))
 		{
-			var d = JSON::parse(msg);
+			var d = parseJSON(msg);
 			String m = d.getProperty("error", var()).getProperty("message", "").toString();
 			if (m.isNotEmpty()) msg = m;
 		}
@@ -1162,5 +1162,32 @@ namespace OpenHAB
 		//before 127.0.0.1 is tried, when openHAB only listens on IPv4
 		if (h.trim().equalsIgnoreCase("localhost")) return "127.0.0.1";
 		return h.trim();
+	}
+
+	int jsonNestingDepth(const juce::String& text)
+	{
+		int depth = 0, maxDepth = 0;
+		bool inString = false, escaped = false;
+		for (auto p = text.getCharPointer(); !p.isEmpty(); ++p)
+		{
+			const juce::juce_wchar c = *p;
+			if (inString)
+			{
+				if (escaped) escaped = false;
+				else if (c == '\\') escaped = true;
+				else if (c == '"') inString = false;
+				continue;
+			}
+			if (c == '"') inString = true;
+			else if (c == '[' || c == '{') maxDepth = juce::jmax(maxDepth, ++depth);
+			else if (c == ']' || c == '}') depth = juce::jmax(0, depth - 1);
+		}
+		return maxDepth;
+	}
+
+	juce::var parseJSON(const juce::String& text, int maxDepth)
+	{
+		if (jsonNestingDepth(text) > maxDepth) return juce::var();
+		return juce::JSON::parse(text);
 	}
 }

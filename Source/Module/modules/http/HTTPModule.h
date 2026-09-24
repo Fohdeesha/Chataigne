@@ -72,6 +72,10 @@ public:
 
 	OwnedArray<Request, CriticalSection> requests;
 	void processRequest(Request * request);
+
+	//The request runs on this module's thread ; the answer creates values and runs scripts, on the message thread
+	void handleResponse(int statusCode, const String& content, ResultDataType rt, var data, std::shared_ptr<XmlElement> doc, const String& url);
+	void clearItem() override;
 	bool requestProgressCallback(int byteDownloaded, int bytesTotal);
 
 	void createControllablesFromXMLResult(XmlElement * data, ControllableContainer* container);

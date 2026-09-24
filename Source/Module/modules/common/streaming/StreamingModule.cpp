@@ -10,7 +10,8 @@
 #include "Module/ModuleIncludes.h"
 
 StreamingModule::StreamingModule(const String& name) :
-	Module(name)
+	Module(name),
+	inboundQueueUpdater(*this)
 {
 	includeValuesInSave = true;
 	setupIOConfiguration(true, true);
@@ -56,7 +57,89 @@ StreamingModule::StreamingModule(const String& name) :
 
 StreamingModule::~StreamingModule()
 {
+	inboundQueueUpdater.cancelPendingUpdate();
+}
 
+void StreamingModule::clearItem()
+{
+	//the receive threads are stopped by now (the derived clearItem) : nothing queued is handled any more
+	{
+		const ScopedLock sl(inboundLock);
+		inboundClosed = true;
+		inboundQueue.clear();
+	}
+	inboundQueueUpdater.cancelPendingUpdate();
+
+	Module::clearItem();
+}
+
+void StreamingModule::runOnMessageThread(std::function<void()> f)
+{
+	if (MessageManager::existsAndIsCurrentThread())
+	{
+		f();
+		return;
+	}
+
+	{
+		const ScopedLock sl(inboundLock);
+		if (inboundClosed) return;
+		if ((int)inboundQueue.size() >= 10000)
+		{
+			droppedInbound++;
+			return;
+		}
+		inboundQueue.push_back(std::move(f));
+	}
+
+	inboundQueueUpdater.triggerAsyncUpdate();
+}
+
+void StreamingModule::handleQueuedInbound()
+{
+	//In arrival order, for at most 20 ms a pass : the rest waits for the next pass, so a flood never holds the message
+	//thread (Auto Add re-sorts the values, and a script runs per message)
+	const uint32 start = Time::getMillisecondCounter();
+	WeakReference<Inspectable> self(this); //a script reacting to the data could remove this module
+	bool drained = false;
+	for (;;)
+	{
+		if (isClearing) return;
+
+		std::function<void()> f;
+		{
+			const ScopedLock sl(inboundLock);
+			drained = inboundQueue.empty();
+			if (drained) break;
+			f = std::move(inboundQueue.front());
+			inboundQueue.pop_front();
+		}
+
+		f();
+		if (self.wasObjectDeleted()) return;
+
+		if (Time::getMillisecondCounter() - start >= 20)
+		{
+			inboundQueueUpdater.triggerAsyncUpdate();
+			break;
+		}
+	}
+
+	//at most one warning every 5 s during a flood, and the rest once it is over
+	int dropped = 0;
+	const uint32 now = Time::getMillisecondCounter();
+	if (drained || now - lastInboundDropLog >= 5000)
+	{
+		const ScopedLock sl(inboundLock);
+		dropped = droppedInbound;
+		droppedInbound = 0;
+	}
+
+	if (dropped > 0)
+	{
+		lastInboundDropLog = now;
+		NLOGWARNING(niceName, "Dropped " << dropped << " incoming message(s) : they arrived faster than they could be handled");
+	}
 }
 
 void StreamingModule::setAutoAddAvailable(bool value)
@@ -106,6 +189,12 @@ void StreamingModule::buildMessageStructureOptions()
 
 void StreamingModule::processDataLine(const String& msg)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, msg] { processDataLine(msg); });
+		return;
+	}
+
 	if (!enabled->boolValue()) return;
 
 	if (thruManager != nullptr)
@@ -301,6 +390,12 @@ void StreamingModule::processDataLine(const String& msg)
 
 void StreamingModule::processDataBytes(Array<uint8_t> data)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, data] { processDataBytes(data); });
+		return;
+	}
+
 	if (!enabled->boolValue()) return;
 	if (logIncomingData->boolValue())
 	{
@@ -441,6 +536,12 @@ void StreamingModule::processDataBytes(Array<uint8_t> data)
 
 void StreamingModule::processDataJSON(const var& data)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, data] { processDataJSON(data); });
+		return;
+	}
+
 	if (!enabled->boolValue()) return;
 	if (logIncomingData->boolValue())
 	{

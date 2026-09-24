@@ -121,6 +121,7 @@ public:
 
 	void timerCallback() override;
 	void run() override;
+	void clearItem() override;
 	void processClient(PJLinkClient* c);
 	void processClientLine(PJLinkClient* c, const String& message);
 

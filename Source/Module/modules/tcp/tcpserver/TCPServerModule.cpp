@@ -69,20 +69,24 @@ void TCPServerModule::sendMessageInternal(const String& message, var)
 
 	Array<StreamingSocket*> connectionsToRemove;
 
-	connectionManager.connections.getLock().enter();
-
-	for (auto& c : connectionManager.connections)
 	{
-		int numBytes = c->write(message.getCharPointer(), message.length());
-		if (numBytes == -1) connectionsToRemove.add(c);
-	}
+		const ScopedLock sl(connectionManager.connections.getLock());
 
-	connectionManager.connections.getLock().exit();
+		Array<StreamingSocket*> failed;
+		for (auto& c : connectionManager.connections)
+		{
+			int numBytes = c->write(message.getCharPointer(), message.length());
+			if (numBytes == -1) failed.add(c);
+		}
+
+		//taken out of the list before the lock is released : no other thread reaches them any more
+		for (auto& c : failed) if (connectionManager.detachConnection(c)) connectionsToRemove.add(c);
+	}
 
 	for (auto& c : connectionsToRemove)
 	{
 		NLOGERROR(niceName, "Error sending message, removing client");
-		connectionManager.removeConnection(c);
+		connectionManager.finishConnection(c);
 		numClients->setValue(connectionManager.connections.size());
 	}
 }
@@ -95,15 +99,28 @@ void TCPServerModule::sendBytesInternal(Array<uint8> data, var)
 		return;
 	}
 	
-	for (auto& c : connectionManager.connections)
+	//As for strings : it iterated without the lock and deleted a failed client in the middle of the loop, possibly one
+	//the reading thread was deleting too
+	Array<StreamingSocket*> connectionsToRemove;
+
 	{
-		int numBytes = c->write(data.getRawDataPointer(), data.size());
-		if (numBytes == -1)
+		const ScopedLock sl(connectionManager.connections.getLock());
+
+		Array<StreamingSocket*> failed;
+		for (auto& c : connectionManager.connections)
 		{
-			NLOGERROR(niceName, "Error sending data, removing client");
-			connectionManager.removeConnection(c);
-			numClients->setValue(connectionManager.connections.size());
+			int numBytes = c->write(data.getRawDataPointer(), data.size());
+			if (numBytes == -1) failed.add(c);
 		}
+
+		for (auto& c : failed) if (connectionManager.detachConnection(c)) connectionsToRemove.add(c);
+	}
+
+	for (auto& c : connectionsToRemove)
+	{
+		NLOGERROR(niceName, "Error sending data, removing client");
+		connectionManager.finishConnection(c);
+		numClients->setValue(connectionManager.connections.size());
 	}
 }
 
@@ -112,6 +129,7 @@ Array<uint8> TCPServerModule::readBytes()
 	Array<uint8> result;
 	
 	Array<StreamingSocket*> connectionsToRemove;
+	Array<StreamingSocket*> lost;
 
 	connectionManager.connections.getLock().enter();
 
@@ -124,7 +142,7 @@ Array<uint8> TCPServerModule::readBytes()
 		int ready = c->waitUntilReady(true, 20);
 		if (ready == -1)
 		{
-			connectionsToRemove.add(c);
+			lost.add(c);
 			continue;
 		}
 
@@ -133,7 +151,7 @@ Array<uint8> TCPServerModule::readBytes()
 			int numRead = c->read(bytes, 2048, false);
 			if (numRead <= 0)
 			{
-				connectionsToRemove.add(c);
+				lost.add(c);
 				continue;
 			}
 
@@ -142,12 +160,14 @@ Array<uint8> TCPServerModule::readBytes()
 		}
 	}
 
+	for (auto& c : lost) if (connectionManager.detachConnection(c)) connectionsToRemove.add(c);
+
 	connectionManager.connections.getLock().exit();
 
 	for (auto& c : connectionsToRemove)
 	{
 		NLOGWARNING(niceName, "Connection to TCP client seems lost, removing client");
-		connectionManager.removeConnection(c);
+		connectionManager.finishConnection(c);
 	}
 
 	return result;

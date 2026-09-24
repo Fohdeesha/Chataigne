@@ -58,7 +58,7 @@ public:
 
 	IntParameter* keepAlive;
 	BoolParameter* isConnected;
-	Trigger* clearValues;
+	Trigger* clearValues = nullptr; //never created : compared against every changed controllable, it was uninitialised
 
 
 	EnablingControllableContainer authenticationCC;

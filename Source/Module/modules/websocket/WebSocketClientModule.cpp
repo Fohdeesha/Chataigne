@@ -91,8 +91,24 @@ void WebSocketClientModule::connectionError(int status, const String& errorMessa
 
 }
 
+void WebSocketClientModule::clearItem()
+{
+	//the socket's thread calls into this module : stopped while the module is whole
+	stopTimer();
+	if (client != nullptr) client->stop();
+	client.reset();
+	StreamingModule::clearItem();
+}
+
 void WebSocketClientModule::messageReceived(const String& message)
 {
+	//the socket's thread : the script and the values on the message thread
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, message] { messageReceived(message); });
+		return;
+	}
+
 	if (!enabled->boolValue()) return;
 	scriptManager->callFunctionOnAllItems(wsMessageReceivedId, message);
 
@@ -130,6 +146,12 @@ void WebSocketClientModule::messageReceived(const String& message)
 
 void WebSocketClientModule::dataReceived(const MemoryBlock& data)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, data] { dataReceived(data); });
+		return;
+	}
+
 	inActivityTrigger->trigger();
 
 	Array<uint8_t> bytes((const uint8_t*)data.getData(), (int)data.getSize());

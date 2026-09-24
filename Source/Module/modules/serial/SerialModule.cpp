@@ -198,9 +198,18 @@ void SerialModule::portRemoved(SerialDevice*)
 	setCurrentPort(nullptr);
 }
 
-void SerialModule::serialDataReceived(SerialDevice*, const var& data)
+void SerialModule::clearItem()
 {
-	switch (port->mode)
+	setCurrentPort(nullptr); //closes the port, which stops its read thread, before a derived module's members go
+	StreamingModule::clearItem();
+}
+
+void SerialModule::serialDataReceived(SerialDevice* device, const var& data)
+{
+	//the port's read thread : the device it came from, not `port`, which the message thread can clear meanwhile
+	if (device == nullptr) return;
+
+	switch (device->mode)
 	{
 
 	case SerialDevice::LINES:

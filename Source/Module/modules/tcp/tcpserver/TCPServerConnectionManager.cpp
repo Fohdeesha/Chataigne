@@ -30,11 +30,17 @@ void TCPServerConnectionManager::setupReceiver(int port, const String& address)
 	startThread();
 }
 
-void TCPServerConnectionManager::removeConnection(StreamingSocket* connection)
+bool TCPServerConnectionManager::detachConnection(StreamingSocket* connection)
 {
-	if (connection == nullptr) return;
+	if (connection == nullptr) return false;
+	const ScopedLock sl(connections.getLock());
+	if (!connections.contains(connection)) return false; //another thread took it
 	connections.removeObject(connection, false);
+	return true;
+}
 
+void TCPServerConnectionManager::finishConnection(StreamingSocket* connection)
+{
 	connectionManagerListeners.call(&ConnectionManagerListener::connectionRemoved, connection);
 	queuedNotifier.addMessage(new ConnectionManagerEvent(ConnectionManagerEvent::CONNECTIONS_CHANGED));
 
@@ -42,14 +48,25 @@ void TCPServerConnectionManager::removeConnection(StreamingSocket* connection)
 	delete connection;
 }
 
+void TCPServerConnectionManager::removeConnection(StreamingSocket* connection)
+{
+	if (detachConnection(connection)) finishConnection(connection);
+}
+
 void TCPServerConnectionManager::close()
 {
-	if (receiver.isConnected())
+	//The accepting thread first : closing the listener ends its wait, and a client it accepted just before was added
+	//after the clients below had been removed, and kept being read. It was given 100 ms, then killed. The listener is
+	//closed again while the thread is still starting : it may not have been listening yet.
+	signalThreadShouldExit();
+	for (int i = 0; i < 100 && isThreadRunning(); ++i)
 	{
-		receiver.close();
-		while (connections.size() > 0) removeConnection(connections[0]);
+		if (receiver.isConnected()) receiver.close();
+		if (waitForThreadToExit(10)) break;
 	}
-	stopThread(100);
+	stopThread(1000);
+
+	while (StreamingSocket* s = connections.getFirst()) removeConnection(s);
 }
 
 void TCPServerConnectionManager::run()

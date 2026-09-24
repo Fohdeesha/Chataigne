@@ -148,27 +148,62 @@ void WebSocketServerModule::sendBytesInternal(Array<uint8> data, var params)
 	
 }
 
+//The server's thread calls these : `server` is replaced on the message thread (setupServer), and was read here while
+//being reset
 void WebSocketServerModule::connectionOpened(const String& connectionId)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, connectionId] { connectionOpened(connectionId); });
+		return;
+	}
+
 	NLOG(niceName, "Connection opened from : " << connectionId);
-	numClients->setValue(server->getNumActiveConnections());
+	if (server != nullptr) numClients->setValue(server->getNumActiveConnections());
 }
 
 void WebSocketServerModule::connectionClosed(const String& connectionId, int status, const String& reason)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, connectionId, status, reason] { connectionClosed(connectionId, status, reason); });
+		return;
+	}
+
 	NLOG(niceName, "Connection closed from : " << connectionId);
-	numClients->setValue(server->getNumActiveConnections());
+	if (server != nullptr) numClients->setValue(server->getNumActiveConnections());
 }
 
 void WebSocketServerModule::connectionError(const String& connectionId, int status, const String& errorMessage)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, connectionId, status, errorMessage] { connectionError(connectionId, status, errorMessage); });
+		return;
+	}
+
 	if (enabled->boolValue()) NLOGERROR(niceName, "Connection error from : " << connectionId << " : " << errorMessage);
 
-	numClients->setValue(server->getNumActiveConnections());
+	if (server != nullptr) numClients->setValue(server->getNumActiveConnections());
+}
+
+void WebSocketServerModule::clearItem()
+{
+	//the server's thread calls into this module : stopped while the module is whole
+	if (server != nullptr) server->stop();
+	server.reset();
+	StreamingModule::clearItem();
 }
 
 void WebSocketServerModule::messageReceived(const String& connectionId, const String& message)
 {
+	//the server's thread : the script and the values on the message thread
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, connectionId, message] { messageReceived(connectionId, message); });
+		return;
+	}
+
 	StreamingType t = streamingType->getValueDataAsEnum<StreamingType>();
 
 	Array<var> args;
@@ -203,6 +238,12 @@ void WebSocketServerModule::messageReceived(const String& connectionId, const St
 
 void WebSocketServerModule::dataReceived(const String& connectionId, const MemoryBlock& data)
 {
+	if (!MessageManager::existsAndIsCurrentThread())
+	{
+		runOnMessageThread([this, connectionId, data] { dataReceived(connectionId, data); });
+		return;
+	}
+
 	inActivityTrigger->trigger();
 
 	Array<uint8_t> bytes((const uint8_t*)data.getData(), (int)data.getSize());

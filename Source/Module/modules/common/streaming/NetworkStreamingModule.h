@@ -43,6 +43,10 @@ public:
 	virtual void clearThread();
 	virtual void clearInternal() {}
 
+	//The receive thread reads the derived module's socket and was only stopped by this class's destructor, once the
+	//derived members (the UDP socket, the TCP server's clients) were gone
+	virtual void clearItem() override;
+
 	virtual void onContainerParameterChangedInternal(Parameter* p) override;
 	virtual void onControllableFeedbackUpdateInternal(ControllableContainer *, Controllable * c) override;
 

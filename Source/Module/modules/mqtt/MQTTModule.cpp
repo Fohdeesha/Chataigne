@@ -448,7 +448,14 @@ void MQTTClientModule::run()
 		retryDelayMs = jmin(retryDelayMs * 2, 10000);
 	}
 
-	if (threadShouldExit()) return;
+	if (threadShouldExit())
+	{
+		//stopped while connecting : stopClient() could not disconnect (this thread held the lock), so the connection
+		//just made would stay open, without keepalives, until the next start or the module's end
+		GenericScopedLock mosqLock(mosquittoLock);
+		disconnect();
+		return;
+	}
 
 	// Pump the network one iteration at a time rather than calling loop_forever(). That call owns its
 	// own reconnect schedule, waits out its delay between attempts with nothing able to interrupt it,
@@ -512,12 +519,17 @@ void MQTTClientModule::stopClient()
 
 #ifdef MOSQUITTO_SUPPORTED
 	{
-		GenericScopedLock mosqLock(mosquittoLock);
-		disconnect();
-		isConnected->setValue(false);
+		//Not while the thread is connecting : connect() holds this lock and blocks until the broker answers or the
+		//system gives up (21 s on Windows for an address that never answers). The thread disconnects itself then.
+		GenericScopedTryLock mosqLock(mosquittoLock);
+		if (mosqLock.isLocked()) disconnect();
 	}
+	isConnected->setValue(false);
 #endif
-	stopThread(5000);
+
+	//Longer than that system timeout : after 5 s JUCE killed the thread inside connect(), which left mosquittoLock
+	//held for good, and every publish, subscription and later stop then waited on it forever
+	stopThread(30000);
 }
 
 /**

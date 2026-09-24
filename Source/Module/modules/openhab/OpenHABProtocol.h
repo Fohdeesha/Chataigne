@@ -210,4 +210,9 @@ namespace OpenHAB
 	bool parseItemTopic(const juce::String& topic, TopicParts& parts);
 
 	juce::String sanitizeHost(const juce::String& text, int& portOverride, bool& wasHttps);
+
+	//JUCE's JSON parser recurses once per nesting level : a reply nested tens of thousands deep ended the process with a
+	//stack overflow. Nothing openHAB sends goes past a few levels ; deeper text is refused (void), unparsed.
+	juce::var parseJSON(const juce::String& text, int maxDepth = 64);
+	int jsonNestingDepth(const juce::String& text); //of [ and { outside strings
 }

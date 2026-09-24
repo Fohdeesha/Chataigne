@@ -81,6 +81,13 @@ void NetworkStreamingModule::clearThread()
 	stopThread(1000);
 }
 
+void NetworkStreamingModule::clearItem()
+{
+	clearThread(); //the derived version too : the TCP server closes its clients there
+	clearInternal();
+	StreamingModule::clearItem();
+}
+
 void NetworkStreamingModule::onContainerParameterChangedInternal(Parameter* p)
 {
 	if (p == enabled)
@@ -240,9 +247,11 @@ void NetworkStreamingModule::run()
 
 						if (b == 0)
 						{
-							uint8_t decodedData[255];
-							size_t numDecoded = cobs_decode(byteBuffer.getRawDataPointer(), byteBuffer.size(), decodedData);
-							processDataBytes(Array<uint8>(decodedData, (int)numDecoded - 1));
+							//decoded into a buffer the size of the frame (a frame over 255 bytes overflowed the fixed one), and
+							//an empty frame (two zeros in a row) is skipped (it made an array of size -1)
+							HeapBlock<uint8_t> decodedData((size_t)byteBuffer.size());
+							size_t numDecoded = cobs_decode(byteBuffer.getRawDataPointer(), byteBuffer.size(), decodedData.get());
+							if (numDecoded >= 1) processDataBytes(Array<uint8>(decodedData.get(), (int)numDecoded - 1));
 							byteBuffer.clear();
 						}
 					}
