@@ -54,6 +54,8 @@ public:
 		WeakReference<Parameter> param;
 		bool missing = false;
 		bool rangeFromServer = false;
+		bool fromServer = false; //spec came from openHAB this session, so its option list is known
+		String displayName; //the label, or "label (item name)" when several items share it
 
 		//hue and saturation of the last lit colour, sent or reported, so black or grey keeps them
 		double hue = 0;
@@ -148,6 +150,7 @@ public:
 	void onContainerParameterChangedInternal(Parameter* p) override;
 	void onControllableFeedbackUpdateInternal(ControllableContainer* cc, Controllable* c) override;
 
+	var getJSONData(bool includeNonOverriden = false) override;
 	void afterLoadJSONDataInternal() override;
 	void fileLoaded() override;
 
@@ -172,6 +175,9 @@ public:
 	Parameter* createParameter(ItemInfo& info);
 	void configureParameter(ItemInfo& info, Parameter* p);
 	void updateEnumOptions(ItemInfo& info, EnumParameter* ep);
+	static Array<OpenHAB::Option> listedOptions(const ItemInfo& info); //what openHAB offers for an enum item
+	static StringArray listedOptionData(const ItemInfo& info);
+	void removeUnlistedOptions(const ItemInfo& info, EnumParameter* ep, const String& keepData);
 	void markMissing(ItemInfo& info);
 	void removeItem(const String& name);
 	void removeMissingItems();

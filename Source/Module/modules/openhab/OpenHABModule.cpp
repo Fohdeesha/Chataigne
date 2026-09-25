@@ -624,6 +624,40 @@ void OpenHABModule::restartConnection()
 	startConnection();
 }
 
+var OpenHABModule::getJSONData(bool includeNonOverriden)
+{
+	var data = Module::getJSONData(includeNonOverriden);
+
+	//An enum option openHAB does not list is only the state it happened to report (see applyStateToParameter) : saved,
+	//it would come back as a choice that does not exist. It is left out, and so is a value that names it, which then
+	//loads empty until openHAB reports again. Items openHAB has not described this session keep what they have.
+	var values = data.getProperty(valuesCC.shortName, var());
+	var params = values.getProperty("parameters", var());
+	if (Array<var>* list = params.getArray())
+	{
+		for (auto& pd : *list)
+		{
+			DynamicObject* o = pd.getDynamicObject();
+			if (o == nullptr) continue;
+			DynamicObject* opts = o->getProperty("enumOptions").getDynamicObject();
+			if (opts == nullptr) continue;
+			ItemInfo* info = itemMap[o->getProperty("shortName").toString()];
+			if (info == nullptr || !info->fromServer) continue;
+
+			const StringArray listed = listedOptionData(*info);
+			StringArray unlisted;
+			for (auto& nv : opts->getProperties()) if (!listed.contains(nv.value.toString())) unlisted.add(nv.name.toString());
+			for (auto& key : unlisted)
+			{
+				opts->removeProperty(key);
+				if (o->getProperty("value").toString() == key) o->removeProperty("value");
+			}
+		}
+	}
+
+	return data;
+}
+
 void OpenHABModule::afterLoadJSONDataInternal()
 {
 	Module::afterLoadJSONDataInternal();
@@ -864,7 +898,7 @@ String OpenHABModule::describeItem(const ItemInfo& info) const
 
 Parameter* OpenHABModule::createParameter(ItemInfo& info)
 {
-	const String nice = info.spec.label.isNotEmpty() ? info.spec.label : info.name;
+	const String nice = info.displayName.isNotEmpty() ? info.displayName : info.spec.label.isNotEmpty() ? info.spec.label : info.name;
 	const String desc = describeItem(info);
 	Parameter* p = nullptr;
 
@@ -904,7 +938,7 @@ Parameter* OpenHABModule::createParameter(ItemInfo& info)
 
 void OpenHABModule::configureParameter(ItemInfo& info, Parameter* p)
 {
-	const String nice = info.spec.label.isNotEmpty() ? info.spec.label : info.name;
+	const String nice = info.displayName.isNotEmpty() ? info.displayName : info.spec.label.isNotEmpty() ? info.spec.label : info.name;
 	if (p->niceName != nice) p->setNiceName(nice);
 	p->description = describeItem(info);
 	if (p->isControllableFeedbackOnly != info.spec.readOnly) p->setControllableFeedbackOnly(info.spec.readOnly);
@@ -948,7 +982,7 @@ void OpenHABModule::configureParameter(ItemInfo& info, Parameter* p)
 	p->saveCustomData = true;
 }
 
-void OpenHABModule::updateEnumOptions(ItemInfo& info, EnumParameter* ep)
+Array<OpenHAB::Option> OpenHABModule::listedOptions(const ItemInfo& info)
 {
 	Array<OpenHAB::Option> opts;
 	if (info.kind == OpenHAB::Kind::PLAYER)
@@ -956,10 +990,21 @@ void OpenHABModule::updateEnumOptions(ItemInfo& info, EnumParameter* ep)
 		for (auto& s : StringArray("PLAY", "PAUSE", "NEXT", "PREVIOUS", "REWIND", "FASTFORWARD")) opts.add({ s, s });
 	}
 	else opts = info.spec.options;
+	return opts;
+}
 
+StringArray OpenHABModule::listedOptionData(const ItemInfo& info)
+{
+	StringArray datas;
+	for (auto& o : listedOptions(info)) datas.add(o.value);
+	return datas;
+}
+
+void OpenHABModule::updateEnumOptions(ItemInfo& info, EnumParameter* ep)
+{
 	StringArray keys;
 	StringArray datas;
-	for (auto& o : opts)
+	for (auto& o : listedOptions(info))
 	{
 		String key = o.label.isNotEmpty() ? o.label : o.value;
 		if (keys.contains(key)) key << " (" << o.value << ")";
@@ -967,21 +1012,49 @@ void OpenHABModule::updateEnumOptions(ItemInfo& info, EnumParameter* ep)
 		datas.add(o.value);
 	}
 
-	bool same = ep->enumValues.size() == keys.size();
-	for (int i = 0; same && i < keys.size(); i++)
+	//a state openHAB lists no option for stays as the one extra option applyStateToParameter gave it. Counting it here
+	//keeps a sync from rebuilding the list every time : clearing it emptied the value for a moment, and anything linked
+	//to it saw the value go blank and come back
+	const String current = ep->getValueData().toString();
+	if (current.isNotEmpty() && !datas.contains(current))
 	{
-		same = ep->enumValues[i]->key == keys[i] && ep->enumValues[i]->value.toString() == datas[i];
+		String key = current;
+		if (keys.contains(key)) key << " (" << current << ")";
+		keys.add(key);
+		datas.add(current);
+	}
+
+	bool same;
+	{
+		GenericScopedLock lock(ep->enumValues.getLock());
+		same = ep->enumValues.size() == keys.size();
+		for (int i = 0; same && i < keys.size(); i++)
+		{
+			same = ep->enumValues[i]->key == keys[i] && ep->enumValues[i]->value.toString() == datas[i];
+		}
 	}
 	if (same) return;
 
-	const String current = ep->getValueData().toString();
 	ep->clearOptions();
 	for (int i = 0; i < keys.size(); i++) ep->addOption(keys[i], datas[i], false);
-	if (current.isNotEmpty() && !ep->setValueWithData(current))
+	if (current.isNotEmpty()) ep->setValueWithData(current);
+}
+
+void OpenHABModule::removeUnlistedOptions(const ItemInfo& info, EnumParameter* ep, const String& keepData)
+{
+	if (!info.fromServer) return; //no list from openHAB to tell them apart
+
+	const StringArray listed = listedOptionData(info);
+	StringArray keys;
 	{
-		ep->addOption(current, current, false);
-		ep->setValueWithData(current);
+		GenericScopedLock lock(ep->enumValues.getLock());
+		for (auto* ev : ep->enumValues)
+		{
+			const String d = ev->value.toString();
+			if (d != keepData && !listed.contains(d)) keys.add(ev->key);
+		}
 	}
+	for (auto& k : keys) ep->removeOption(k);
 }
 
 void OpenHABModule::ensureParameter(ItemInfo& info)
@@ -1044,6 +1117,7 @@ void OpenHABModule::applyStructure(const var& list)
 	skippedCount = 0;
 	bool needsSort = false;
 
+	Array<OpenHAB::ItemSpec> specs;
 	for (auto& dto : *dtos)
 	{
 		OpenHAB::ItemSpec spec;
@@ -1061,17 +1135,35 @@ void OpenHABModule::applyStructure(const var& list)
 			continue;
 		}
 
+		specs.add(spec);
+	}
+
+	//Items sharing a label are shown as "label (item name)". Left to the container, the second one got a number, and
+	//every sync then set the label back and had it numbered again : each value was renamed twice per sync, and which
+	//one got the number depended on the order they came in. Decided from the whole list, the names are stable.
+	HashMap<String, int> labelCount;
+	for (auto& s : specs)
+	{
+		const String base = s.label.isNotEmpty() ? s.label : s.name;
+		labelCount.set(base, labelCount[base] + 1);
+	}
+
+	for (auto& spec : specs)
+	{
 		ItemInfo* info = getOrCreateInfo(spec.name);
 		const bool isNew = info->param == nullptr;
-		const String oldLabel = info->spec.label;
+		const String oldDisplayName = info->displayName;
+		const String base = spec.label.isNotEmpty() ? spec.label : spec.name;
+		info->displayName = labelCount[base] > 1 ? base + " (" + spec.name + ")" : base;
 		info->spec = spec;
 		info->kind = spec.kind;
 		info->missing = false;
+		info->fromServer = true;
 		ensureParameter(*info);
 		usable.set(spec.name, 1);
 
 		if (isNew) added++;
-		if (isNew || oldLabel != spec.label) needsSort = true;
+		if (isNew || oldDisplayName != info->displayName) needsSort = true;
 
 		if (spec.hasState) handleRemoteState(*info, String(), spec.state); //servers that ignore staticDataOnly send states along
 	}
@@ -1104,6 +1196,17 @@ void OpenHABModule::applyStructure(const var& list)
 	if (!nowMissing.isEmpty())
 	{
 		NLOGWARNING(niceName, nowMissing.size() << " item(s) are gone from openHAB or no longer of a type this module handles. Their values are kept until \"Remove Missing Items\" : " << nowMissing.joinIntoString(", ").substring(0, 500));
+	}
+
+	//A value renamed above onto a name another value still held (one renamed later in the loop, or one that has just
+	//been marked missing) was given a number by the container. Every name is final now, so set the wanted ones again.
+	for (auto* info : items)
+	{
+		if (info->missing || !usable.contains(info->name) || info->displayName.isEmpty()) continue;
+		if (Parameter* p = info->param.get())
+		{
+			if (p->niceName != info->displayName) p->setNiceName(info->displayName);
+		}
 	}
 
 	if (needsSort)
@@ -1260,9 +1363,14 @@ void OpenHABModule::applyStateToParameter(ItemInfo& info, const String& stateTyp
 		if (!ep->setValueWithData(value))
 		{
 			//a state openHAB describes no option for : show it anyway rather than keep a stale one
-			ep->addOption(value, value, false);
+			String key = value;
+			if (ep->getIndexForKey(key) >= 0) key << " (" << value << ")"; //an option's label can be another's value
+			ep->addOption(key, value, false);
 			ep->setValueWithData(value);
 		}
+		//one such option at most, the state reported now : earlier ones go once the state has moved on, rather than
+		//piling up with every state the device ever reported
+		removeUnlistedOptions(info, ep, value);
 	}
 	break;
 
