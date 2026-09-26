@@ -1,0 +1,88 @@
+/*
+  ==============================================================================
+
+    DashboardItem.cpp
+    Created: 19 Apr 2017 11:06:51pm
+    Author:  Ben
+
+  ==============================================================================
+*/
+
+DashboardGroupItem::DashboardGroupItem() :
+	DashboardItem(nullptr, "Group")
+{
+	borderWidth = addFloatParameter("Border Width", "Width of the border to show", 1, 0);
+	borderColor = addColorParameter("Border Color", "Color of the border", NORMAL_COLOR);
+	backgroundColor = addColorParameter("Background Color", "Color of the background", NORMAL_COLOR.withAlpha(.05f));
+	backgroundColor->canBeDisabledByUser = true;
+
+	itemManager.editorIsCollapsed = true;
+    addChildControllableContainer(&itemManager);
+	itemManager.addBaseManagerListener(this);
+	itemManager.addDashboardFeedbackListener(this);
+}
+
+DashboardGroupItem::~DashboardGroupItem()
+{
+	itemManager.removeBaseManagerListener(this);
+	itemManager.removeDashboardFeedbackListener(this);
+	for (auto& i : itemManager.items) i->removeDashboardFeedbackListener(this);
+}
+
+void DashboardGroupItem::itemAdded(DashboardItem* item)
+{
+	item->addDashboardFeedbackListener(this);
+}
+
+void DashboardGroupItem::itemsAdded(Array<DashboardItem*> items)
+{
+	for (auto& i : items) i->addDashboardFeedbackListener(this);
+}
+
+void DashboardGroupItem::itemRemoved(DashboardItem* item)
+{
+	item->removeDashboardFeedbackListener(this);
+}
+
+void DashboardGroupItem::itemsRemoved(Array<DashboardItem*> items)
+{
+	for (auto& i : items) i->removeDashboardFeedbackListener(this);
+}
+
+var DashboardGroupItem::getServerData()
+{
+	var data = DashboardItem::getServerData();
+	if(backgroundColor->enabled) data.getDynamicObject()->setProperty("backgroundColor", backgroundColor->value);
+	data.getDynamicObject()->setProperty("borderWidth", borderWidth->value);
+	data.getDynamicObject()->setProperty("borderColor", borderColor->value);
+
+
+	itemManager.fillServerData(data);
+
+	return data;
+}
+
+
+var DashboardGroupItem::getJSONData(bool includeNonOverriden)
+{
+	var data = DashboardItem::getJSONData(includeNonOverriden);
+	data.getDynamicObject()->setProperty("itemManager", itemManager.getJSONData());
+	return data;
+}
+
+void DashboardGroupItem::loadJSONDataItemInternal(var data)
+{
+	DashboardItem::loadJSONDataItemInternal(data);
+	itemManager.loadJSONData(data.getProperty("itemManager", var()));
+}
+
+bool DashboardGroupItem::paste()
+{
+	itemManager.addItemsFromClipboard();
+	return true;
+}
+
+DashboardItemUI * DashboardGroupItem::createUI()
+{
+	return new DashboardGroupItemUI(this);
+}

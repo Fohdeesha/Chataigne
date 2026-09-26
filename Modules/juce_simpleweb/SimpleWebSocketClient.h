@@ -1,0 +1,122 @@
+/*
+  ==============================================================================
+
+	juce_SimpleWebSocket.h
+	Created: 17 Jun 2020 11:22:54pm
+	Author:  bkupe
+
+  ==============================================================================
+*/
+
+#pragma once
+
+#define USE_STANDALONE_ASIO 1
+#define NOGDI
+#define ASIO_DISABLE_SERIAL_PORT 1
+
+using WsClient = SimpleWeb::SocketClient<SimpleWeb::WS>;
+
+class SimpleWebSocketClientBase :
+	public juce::Thread
+{
+public:
+	SimpleWebSocketClientBase();
+
+	virtual ~SimpleWebSocketClientBase();
+
+	juce::String serverPath;
+	bool isConnected;
+	bool isClosing;
+
+	virtual void start(const juce::String& _serverPath, int timeOutInSeconds = 1000);
+
+	virtual void send(const juce::String& message) {}
+	virtual void send(const char* data, int numData) {}
+
+	void send(const juce::MemoryBlock& data);
+
+	void stop();
+	virtual void stopInternal() {}
+	virtual void stopIO() {} //stops the io loop only, asked again by stop() until the thread has left
+	virtual void run();
+
+	virtual void initWS() {}
+
+
+	void handleNewConnectionCallback();
+	void handleConnectionClosedCallback(int status, const juce::String& reason);
+	void handleErrorCallback(int status, const juce::String& message);
+
+	class Listener
+	{
+	public:
+		virtual ~Listener() {}
+		virtual void connectionOpened() {}
+		virtual void messageReceived(const juce::String& message) {}
+		virtual void dataReceived(const juce::MemoryBlock& data) {}
+		virtual void connectionClosed(int status, const juce::String& reason) {}
+		virtual void connectionError(int status, const juce::String& message) {}
+	};
+
+	juce::ListenerList<Listener> webSocketListeners;
+	void addWebSocketListener(Listener* newListener) { webSocketListeners.add(newListener); }
+	void removeWebSocketListener(Listener* listener) { webSocketListeners.remove(listener); }
+
+protected:
+	int requestTimeOut = 1000; // In seconds 
+};
+
+class SimpleWebSocketClient :
+	public SimpleWebSocketClientBase
+{
+
+public:
+
+	std::unique_ptr<WsClient> ws;
+	std::shared_ptr<WsClient::Connection> connection;
+	juce::CriticalSection wsLock; //ws is created on the socket's thread, connection set there : both read from others
+
+	SimpleWebSocketClient();
+	~SimpleWebSocketClient();
+
+	void send(const juce::String& message) override;
+	void send(const char* data, int numData) override;
+	void stopInternal() override;
+	void stopIO() override;
+
+	void initWS() override;
+
+	void onMessageCallback(std::shared_ptr<WsClient::Connection> connection, std::shared_ptr<WsClient::InMessage> in_message);
+	void onNewConnectionCallback(std::shared_ptr<WsClient::Connection> _connection);
+	void onConnectionCloseCallback(std::shared_ptr<WsClient::Connection> /*_connection*/, int status, const std::string& reason);
+	void onErrorCallback(std::shared_ptr<WsClient::Connection> /*_connection*/, const SimpleWeb::error_code& ec);
+};
+
+#if SIMPLEWEB_SECURE_SUPPORTED
+using WssClient = SimpleWeb::SocketClient<SimpleWeb::WSS>;
+
+class SecureWebSocketClient :
+	public SimpleWebSocketClientBase
+{
+
+public:
+	std::unique_ptr<WssClient> ws;
+	std::shared_ptr<WssClient::Connection> connection;
+	juce::CriticalSection wsLock;
+
+	SecureWebSocketClient();
+	~SecureWebSocketClient();
+
+	void send(const juce::String& message) override;
+	void send(const char* data, int numData) override;
+	void stopInternal() override;
+	void stopIO() override;
+
+	void initWS() override;
+
+	void onMessageCallback(std::shared_ptr<WssClient::Connection> connection, std::shared_ptr<WssClient::InMessage> in_message);
+	void onNewConnectionCallback(std::shared_ptr<WssClient::Connection> _connection);
+	void onConnectionCloseCallback(std::shared_ptr<WssClient::Connection> /*_connection*/, int status, const std::string& reason);
+	void onErrorCallback(std::shared_ptr<WssClient::Connection> /*_connection*/, const SimpleWeb::error_code& ec);
+};
+#endif

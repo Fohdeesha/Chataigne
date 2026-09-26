@@ -1,0 +1,740 @@
+/*
+ ==============================================================================
+
+ MaincComponentFileDocument.cpp
+ Created: 25 Mar 2016 7:07:20pm
+ Author:  Martin Hermant
+
+ ==============================================================================
+ */
+
+
+#include "JuceHeader.h" //for project infos
+#include "Engine.h"
+
+static const String restoreAutosaveAlertWindowTitle = "Restore autosave ?";
+
+static OrganicApplication& getApp();
+String getAppVersion();
+ApplicationProperties& getAppProperties();
+OrganicApplication::MainWindow* getMainWindow();
+
+String Engine::getDocumentTitle() {
+	if (!getFile().exists())
+		return "New unsaved session";
+
+	return getFile().getFileName();
+}
+
+void Engine::changed()
+{
+	FileBasedDocument::changed();
+	lastChangeTime = Time::getCurrentTime();
+	isThereChangeToBackup = true;
+	engineListeners.call(&EngineListener::fileChanged);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::FILE_CHANGED, this));
+}
+
+void Engine::createNewGraph() {
+
+	clear();
+	isLoadingFile = true;
+
+	//init with default data here
+	createNewGraphInternal();
+	setFile(File());
+
+	engineListeners.call(&EngineListener::startLoadFile);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::START_LOAD_FILE, this));
+
+
+	afterLoadFileInternal();
+
+	engineListeners.call(&EngineListener::endLoadFile);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::END_LOAD_FILE, this));
+
+	//maybe dangerous to swap here with all things that check for loading, was before the listener before
+	isLoadingFile = false;
+	setChangedFlag(false);
+
+	//ShapeShifterManager::getInstance()->loadDefaultLayoutFile();
+
+	handleAsyncUpdate();
+
+	// TODO: This is already called in handleAsyncUpdate
+	engineListeners.call(&EngineListener::fileLoaded);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::FILE_LOADED, this));
+
+#if ORGANICUI_USE_WEBSERVER
+	if (notifyRemoteControlOnClear)
+	{
+		OSCRemoteControl::getInstance()->sendPathChangedFeedback(getControlAddress());
+	}
+#endif
+}
+
+Result Engine::loadDocument(const File& file) {
+
+	if (checkAutoRestoreAutosave(file, [this](const juce::File& f) { loadDocumentNoCheck(f); })) return Result::ok();
+	return loadDocumentNoCheck(file);
+}
+
+juce::Result Engine::loadDocumentNoCheck(const juce::File& file)
+{
+	if (isLoadingFile) {
+		// TODO handle quick reloading of file
+		return Result::fail("engine already loading");
+	}
+
+	isLoadingFile = true;
+	engineListeners.call(&EngineListener::startLoadFile);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::START_LOAD_FILE, this));
+
+	if (InspectableSelectionManager::mainSelectionManager != nullptr)  InspectableSelectionManager::mainSelectionManager->setEnabled(false); //avoid creation of inspector editor while recreating all nodes, controllers, rules,etc. from file
+
+#ifdef MULTITHREADED_LOADING
+	fileLoader = new FileLoader(this, file);
+	fileLoader->startThread(10);
+#else
+	loadDocumentAsync(file);
+	updateScriptObject();
+#endif
+
+	handleAsyncUpdate();
+
+	lastFileAbsolutePath = getFile().getFullPathName();
+	return Result::ok();
+}
+
+//Called from fileLoader
+void Engine::loadDocumentAsync(const File& file) {
+
+	clearTasks();
+	taskName = "Loading File";
+	loadingStartTime = Time::currentTimeMillis();
+
+	ProgressTask* clearTask = addTask("clearing");
+	ProgressTask* parseTask = addTask("parsing");
+	ProgressTask* loadTask = addTask("loading");
+	std::unique_ptr<InputStream> is(file.createInputStream());
+
+	if (is == nullptr)
+	{
+		LOGERROR("Could not open file for reading: " << file.getFullPathName());
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "File read error", "The file could not be opened. Check that it still exists and that you have permission to read it.", "OK");
+		setFile(File());
+		//loadDocumentNoCheck() disabled selection before calling this, and only clear() and loadJSONData() re-enable it :
+		//returning before either would leave nothing selectable in the session that stays open
+		if (InspectableSelectionManager::mainSelectionManager != nullptr) InspectableSelectionManager::mainSelectionManager->setEnabled(true);
+		return;
+	}
+
+	clearTask->start();
+	clear();
+	clearTask->end();
+
+	//  {
+	//    MessageManagerLock ml;
+	//  }
+	setFile(file);
+	file.getParentDirectory().setAsCurrentWorkingDirectory();
+
+	{
+		parseTask->start();
+		String s = is->readEntireStreamAsString();
+		Result result = JSON::parse(s, jsonData);
+		parseTask->end();
+
+		if (result.failed())
+		{
+			LOGERROR("Error reading file :\n" << result.getErrorMessage());
+
+			AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "File format error", "The file you want to open is not a valid noisette. Error :\n" + result.getErrorMessage(), "Ok, i guess");
+			setFile(File());
+			return;
+		}
+
+		loadTask->start();
+		loadJSONData(jsonData, loadTask);
+		loadTask->end();
+
+
+	}// deletes data before launching audio, (data not needed after loaded)
+
+	jsonData = var();
+	setChangedFlag(false);
+	lastChangeTime = file.getLastModificationTime();
+}
+
+
+
+bool Engine::allLoadingThreadsAreEnded() {
+	return true;//NodeManager::getInstance()->getNumJobs()== 0 && (fileLoader && fileLoader->isEnded);
+}
+
+void Engine::fileLoaderEnded() {
+	if (allLoadingThreadsAreEnded()) {
+		triggerAsyncUpdate();
+	}
+}
+
+
+void Engine::handleAsyncUpdate()
+{
+
+	if (getFile().exists()) {
+		setLastDocumentOpened(getFile());
+	}
+
+	//  graphPlayer.setProcessor(NodeManager::getInstance()->mainContainer->getAudioGraph());
+	//  suspendAudio(false);
+	int64 timeForLoading = Time::currentTimeMillis() - loadingStartTime;
+	setChangedFlag(false);
+
+	afterLoadFileInternal();
+
+	engineListeners.call(&EngineListener::endLoadFile);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::END_LOAD_FILE, this));
+
+	isLoadingFile = false;
+
+	NLOG("Engine", "Session loaded in " << timeForLoading / 1000.0 << "s");
+
+	engineListeners.call(&EngineListener::fileLoaded);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::FILE_LOADED, this));
+}
+
+
+
+Result Engine::saveDocument(const File& file) {
+
+	var data = getJSONData();
+	return saveDocumentFromJSON(file, data);
+}
+
+juce::Result Engine::saveCopy()
+{
+	if (!getFile().existsAsFile()) return Result::ok();
+
+	String curFileName = getFile().getFileNameWithoutExtension();
+	File copyFile = getFile().getParentDirectory().getNonexistentChildFile(curFileName + " copy" + getFile().getFileExtension(), "", false);
+	var data = getJSONData();
+
+	if (copyFile.exists()) copyFile.deleteFile();
+	std::unique_ptr<OutputStream> os(copyFile.createOutputStream());
+
+	if (os == nullptr)
+	{
+		LOGERROR("Error saving the document");
+		return Result::fail("Error saving the document, maybe you don't have write access ?");
+	}
+
+	JSON::writeToStream(*os, data);
+	os->flush();
+
+	LOG("Saved copy to " << copyFile.getFullPathName());
+
+	return Result::ok();
+}
+
+Result Engine::saveBackupDocument(int index)
+{
+
+	if (GlobalSettings::getInstance()->autoSaveOnChangeOnly->boolValue() && !isThereChangeToBackup) { return Result::ok(); }
+
+	if (!getFile().existsAsFile()) return Result::ok();
+
+	String curFileName = getFile().getFileNameWithoutExtension();
+	File autoSaveDir = getFile().getParentDirectory().getChildFile(curFileName + "_autosave");
+	autoSaveDir.createDirectory();
+	File backupFile = autoSaveDir.getChildFile(curFileName + "_autosave_" + String(index) + fileExtension);
+	var data = getJSONData();
+
+	if (backupFile.exists()) backupFile.deleteFile();
+	std::unique_ptr<OutputStream> os(backupFile.createOutputStream());
+
+	if (os == nullptr)
+	{
+		LOGERROR("Error saving the document");
+		return Result::fail("Error saving the document, maybe you don't have write access ?");
+	}
+
+	JSON::writeToStream(*os, data);
+	os->flush();
+
+	if (GlobalSettings::getInstance()->logAutosave->boolValue()) LOG("Saved backup to " << backupFile.getFullPathName());
+
+	lastChangeTime = Time::getCurrentTime(); //needed to avoid detecting latest autosave as more recent than current file
+
+	isThereChangeToBackup = false; // set to false, until changed() methods is call
+	autoSaveIndex = (autoSaveIndex + 1) % GlobalSettings::getInstance()->autoSaveCount->intValue();
+	return Result::ok();
+}
+
+void Engine::loadDocumentFromJSON(var data)
+{
+	if (!data.isObject()) return;
+
+	clearTasks();
+	taskName = "Loading File";
+
+	ProgressTask* clearTask = addTask("clearing");
+	ProgressTask* loadTask = addTask("loading");
+
+	clearTask->start();
+	clear();
+	clearTask->end();
+
+	//  {
+	//    MessageManagerLock ml;
+	//  }
+
+	loadingStartTime = Time::currentTimeMillis();
+	setFile(File());
+
+	{
+
+		loadTask->start();
+		loadJSONData(data, loadTask);
+		loadTask->end();
+
+
+	}// deletes data before launching audio, (data not needed after loaded)
+
+	jsonData = var();
+	setChangedFlag(false);
+}
+
+Result Engine::saveDocumentFromJSON(const juce::File& file, const juce::var& data)
+{
+	bool sameFile = lastFileAbsolutePath == file.getFullPathName();
+
+	if (file.exists())
+	{
+		file.deleteFile();
+	}
+	file.create(); // recursively create parents create + empty file, beacause next line will not create parent dirs
+
+	std::unique_ptr<OutputStream> os(file.createOutputStream());
+	if (os == nullptr)
+	{
+		LOGERROR("Error saving document, please try again");
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "Session save error", "Damned ! Something went wrong when saving the file, you should definitely try to save it again.", "Gotcha");
+		return Result::fail("Could not save the file : output stream is null");
+	}
+
+	JSON::writeToStream(*os, data, GlobalSettings::getInstance()->compressOnSave->boolValue());
+	os->flush();
+
+	setLastDocumentOpened(file);
+	setChangedFlag(false);
+	file.setAsCurrentWorkingDirectory();
+
+	lastChangeTime = Time::getCurrentTime();
+
+	engineListeners.call(&EngineListener::fileSaved, !sameFile);
+	engineNotifier.addMessage(new EngineEvent(EngineEvent::FILE_SAVED, this));
+
+	lastFileAbsolutePath = getFile().getFullPathName();
+
+	return Result::ok();
+}
+
+File Engine::getLastDocumentOpened() {
+
+	RecentlyOpenedFilesList recentFiles;
+	recentFiles.restoreFromString(getAppProperties().getUserSettings()
+		->getValue(lastFileListKey));
+
+	return recentFiles.getFile(0);
+}
+
+void Engine::setLastDocumentOpened(const File& file) {
+
+	RecentlyOpenedFilesList recentFiles;
+	recentFiles.restoreFromString(getAppProperties().getUserSettings()
+		->getValue(lastFileListKey));
+
+	recentFiles.addFile(file);
+
+	getAppProperties().getUserSettings()->setValue(lastFileListKey, recentFiles.toString());
+
+}
+
+File Engine::getAutosavesDirectory(const File& originalFile) const
+{
+	File f = originalFile;
+	String curFileName;
+	File curFileFolder;
+	if (f.existsAsFile())
+	{
+		curFileName = originalFile.getFileNameWithoutExtension();
+		curFileFolder = originalFile.getParentDirectory();
+	}
+	else
+	{
+		f = File::getSpecialLocation(File::userDocumentsDirectory).getChildFile(ProjectInfo::projectName);
+		curFileFolder = f;
+		curFileName = "unsaved_session";
+	}
+
+	File autoSaveDir = curFileFolder.getChildFile(curFileName + "_autosave");
+	return autoSaveDir;
+}
+
+bool Engine::checkAutoRestoreAutosave(const juce::File& originalFile, std::function<void(const juce::File&)> cancelCallback)
+{
+	if (!GlobalSettings::getInstance()->autoAskRestore->boolValue()) return false;
+	if (getMainWindow() == nullptr) return false; //only ask if there is a window
+
+	File autoSaveDir = getAutosavesDirectory(originalFile);
+	autoSaveDir.createDirectory();
+	Array<File> files = autoSaveDir.findChildFiles(File::findFiles, false, "*" + fileExtension);
+	std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.getLastModificationTime() > b.getLastModificationTime(); });
+
+	if (files.isEmpty()) return false;
+
+	File lastAutoSave = files.getFirst();
+	if (lastAutoSave.getLastModificationTime() <= originalFile.getLastModificationTime()) return false;
+
+	AlertWindow::showOkCancelBox(
+		AlertWindow::AlertIconType::QuestionIcon, restoreAutosaveAlertWindowTitle, "A more recent autosave file has been found, do you want to restore it ?", "Yes", "No", nullptr,
+		ModalCallbackFunction::create([this, originalFile, lastAutoSave, cancelCallback](int result)
+			{
+				if (result == 0) // Cancel
+				{
+					if (cancelCallback != nullptr)
+					{
+						cancelCallback(originalFile);
+					}
+				}
+				else if (result == 1) // Ok
+				{
+					this->restoreAutosave(originalFile, lastAutoSave);
+				}
+			}));
+
+	return true;
+}
+
+void Engine::restoreAutosave(const juce::File& originalFile, const juce::File& autosaveFile)
+{
+	if (!autosaveFile.existsAsFile())
+	{
+		LOGERROR("Autosave file does not exist");
+		return;
+	}
+	// Copy autosave file to current file
+	if (originalFile.existsAsFile())
+	{
+		originalFile.deleteFile();
+	}
+	if (!autosaveFile.copyFileTo(originalFile))
+	{
+		LOGERROR("Failed to copy autosave file to current file");
+		return;
+	}
+	// Reload the document
+	loadDocument(originalFile);
+}
+
+void Engine::dismissRestoreAutosaveAlertWindow()
+{
+	auto count = ModalComponentManager::getInstance()->getNumModalComponents();
+	for (auto i = 0; i < count; ++i)
+	{
+		auto component = ModalComponentManager::getInstance()->getModalComponent(i);
+		if (component->getTitle() == restoreAutosaveAlertWindowTitle)
+		{
+			component->exitModalState(2); // Neither ok or cancel
+		}
+	}
+}
+
+void Engine::removeNewerAutosaves() const
+{
+	const File& currentFile = getFile();
+	
+	if (!currentFile.exists())
+	{
+		// Can happen on a new file before it has been saved
+		return;
+	}
+	
+	const File autosavesDir = getAutosavesDirectory(currentFile);
+
+	const Array<File> autosaveFiles = autosavesDir.findChildFiles(File::findFiles, false, "*" + fileExtension);
+	for (const File& autosave : autosaveFiles)
+	{
+		if (autosave.getLastModificationTime() > currentFile.getLastModificationTime())
+		{
+			autosave.deleteFile();
+		}
+	}
+}
+
+var Engine::getJSONData(bool includeNonOverriden)
+{
+	var data = ControllableContainer::getJSONData(includeNonOverriden);
+	var metaData(new DynamicObject());
+
+	metaData.getDynamicObject()->setProperty("version", ProjectInfo::versionString);
+	metaData.getDynamicObject()->setProperty("versionNumber", ProjectInfo::versionNumber);
+
+	data.getDynamicObject()->setProperty("metaData", metaData);
+
+	var pData = ProjectSettings::getInstance()->getJSONData();
+	if (!pData.isVoid() && pData.getDynamicObject()->getProperties().size() > 0) data.getDynamicObject()->setProperty("projectSettings", pData);
+
+	var dData = DashboardManager::getInstance()->getJSONData();
+	if (!dData.isVoid() && dData.getDynamicObject()->getProperties().size() > 0) data.getDynamicObject()->setProperty("dashboardManager", dData);
+
+	var paData = ParrotManager::getInstance()->getJSONData();
+	if (!paData.isVoid() && paData.getDynamicObject()->getProperties().size() > 0) data.getDynamicObject()->setProperty(ParrotManager::getInstance()->shortName, paData);
+
+	if (ProjectSettings::getInstance()->saveLayoutReference->boolValue())
+	{
+		var layoutData = ShapeShifterManager::getInstance()->getCurrentLayout();
+		if (!layoutData.isVoid()) data.getDynamicObject()->setProperty("layout", layoutData);
+	}
+
+	return data;
+}
+
+/// ===================
+// loading
+
+void Engine::loadJSONData(var data, ProgressTask* loadingTask)
+{
+	clear();
+
+
+	DynamicObject* dObject = data.getDynamicObject();
+	if (dObject == nullptr)
+	{
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "File format error", "The file you want to open is not a valid noisette.", "Ok, i guess");
+		setFile(File());
+		return;
+	}
+
+
+	DynamicObject* md = data.getDynamicObject()->getProperty("metaData").getDynamicObject();
+	if (md == nullptr)
+	{
+		LOGERROR("File format error : no metaData found");
+		setFile(File());
+		return;
+	}
+
+	const bool fileVersionSupported = checkFileVersion(md);
+
+	String versionString = md->hasProperty("version") ? md->getProperty("version").toString() : "?";
+	if (!fileVersionSupported)
+	{
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "You're old, dude !", "File version (" + versionString + ") is not supported anymore.\n(Minimum supported version : " + getMinimumRequiredFileVersion() + ")");
+		setFile(File());
+		return;
+	}
+
+	const AppVersion currentVersion(getAppVersion()); 
+	const AppVersion fileVersion(versionString);
+
+	const bool appVersionIsNewerThanFileVersion = fileVersion < currentVersion;
+	const bool fileVersionRequiresMigration = versionNeedsFormatMigration(fileVersion);
+	const bool migrationIsPossible = isFileFormatMigrationSupported(fileVersion);
+	if (appVersionIsNewerThanFileVersion && fileVersionRequiresMigration && migrationIsPossible)
+	{
+		migrateThenLoadFileIfUserAgrees(fileVersion, data, loadingTask);
+		return;
+	}
+
+	loadJSONDataEngine(data, loadingTask);
+}
+
+bool Engine::migrateFileToCurrentVersion(const AppVersion& inFileVersion, const var& inFileData, var* outFileData) const
+{
+	jassert(outFileData != nullptr);
+
+	inFileData.getDynamicObject()->setProperty("appVersion", getAppVersion());
+	URL url = URL(convertURL).withPOSTData(JSON::toString(inFileData, true));
+	WebInputStream stream(url, true);
+
+	StringArray headers;
+	headers.add("Content-Type : application/json");
+	headers.add("Accept : application/json");
+	headers.add("User-Agent : " + String(ProjectInfo::projectName) + "/1.0");
+
+	String convertedData = stream.withExtraHeaders(headers.joinIntoString("\r\n")).readEntireStreamAsString();
+	if (convertedData.isEmpty())
+	{
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "Update error", "Could not connect to the update server, please make sure you are connected to internet. You can still reload your file and not update it.", "Well, shit happens");
+		return false;
+	}
+
+	LOG(convertedData);
+	*outFileData = JSON::parse(convertedData);
+
+	if (outFileData->isVoid())
+	{
+		AlertWindow::showMessageBoxAsync(AlertWindow::AlertIconType::WarningIcon, "Update error", "There is an error with the converted file, the data is badly formatted. I mean, real bad. You can still reload your file and not update it.", "Well, shit happens");
+		return false;
+	}
+
+	return true;
+}
+
+void Engine::migrateThenLoadFileIfUserAgrees(const AppVersion& fileVersion, const var& fileData, ProgressTask* loadingTask)
+{
+	AlertWindow::showAsync(MessageBoxOptions()
+		.withIconType(AlertWindow::QuestionIcon)
+		.withTitle("File compatibility check")
+		.withMessage("Your file has been saved with an older version of " + OrganicApplication::getInstance()->getApplicationName() + " (" + fileVersion.toString() + "), some data may be lost if you load it directly. You can choose to update the file online, load it directly or cancel the operation.\nIn any case, your current file will be backed up with \"_backup\" appended to its name.")
+		.withButton("Update")
+		.withButton("Load directly")
+		.withButton("Cancel"),
+		[this, fileVersion, fileData, loadingTask](int result)
+		{
+			File f = getFile();
+			if (f.exists())
+			{
+				File backupF = f.getParentDirectory().getNonexistentChildFile(f.getFileNameWithoutExtension() + "_backup", f.getFileExtension(), true);
+				f.copyFileTo(backupF);
+				LOG("Your original file has been copied to " << backupF.getFullPathName());
+			}
+
+			switch (result)
+			{
+			case 1: // update
+			{
+				var migratedFileData;
+				if (migrateFileToCurrentVersion(fileVersion, fileData, &migratedFileData))
+				{
+					// continue loading with new data
+					loadJSONDataEngine(migratedFileData, loadingTask);
+					saveDocumentFromJSON(f, migratedFileData);
+				}
+				else 
+				{
+					setFile(File());
+				}
+
+				break;
+			}
+			case 2: // load directly
+			{
+				// do nothing
+				loadJSONDataEngine(fileData, loadingTask);
+				break;
+			}
+			}
+		}
+	);
+}
+
+bool Engine::isFileFormatMigrationSupported(const AppVersion& fromVersion) const 
+{
+	return convertURL.isNotEmpty();
+}
+
+void Engine::loadJSONDataEngine(var data, ProgressTask* loadingTask)
+{
+	isLoadingFile = true;
+
+	DynamicObject* d = data.getDynamicObject();
+	var layoutData = d->getProperty("layout");
+	if (layoutData.isVoid()) layoutData = ShapeShifterManager::getInstance()->getCurrentLayout();
+
+	ShapeShifterManager::getInstance()->clearAllPanelsAndWindows();
+
+	ControllableContainer::loadJSONData(data);
+
+	//if (InspectableSelectionManager::mainSelectionManager != nullptr) InspectableSelectionManager::mainSelectionManager->setEnabled(false); //avoid creation of inspector editor while recreating all nodes, controllers, rules,etc. from file
+
+	if (Outliner::getInstanceWithoutCreating() != nullptr) Outliner::getInstance()->setEnabled(false);
+
+
+	ProgressTask* projectTask = loadingTask->addTask("Project Settings");
+	ProgressTask* dashboardTask = loadingTask->addTask("Dashboard");
+	ProgressTask* parrotTask = loadingTask->addTask("Parrot");
+
+
+
+
+	projectTask->start();
+	if (d->hasProperty("projectSettings")) ProjectSettings::getInstance()->loadJSONData(d->getProperty("projectSettings"));
+	projectTask->setProgress(1);
+	projectTask->end();
+
+	loadJSONDataInternalEngine(data, loadingTask);
+
+	parrotTask->start();
+	ParrotManager::getInstance()->loadJSONData(data.getProperty(ParrotManager::getInstance()->shortName, var()));
+	parrotTask->setProgress(1);
+	parrotTask->end();
+
+	dashboardTask->start();
+	if (d->hasProperty("dashboardManager")) DashboardManager::getInstance()->loadJSONData(d->getProperty("dashboardManager"));
+	dashboardTask->setProgress(1);
+	dashboardTask->end();
+
+	ShapeShifterManager::getInstance()->loadLayout(layoutData);
+
+
+	if (InspectableSelectionManager::mainSelectionManager != nullptr) InspectableSelectionManager::mainSelectionManager->setEnabled(true); //Re enable editor
+	if (Outliner::getInstanceWithoutCreating() != nullptr) Outliner::getInstance()->setEnabled(true);
+
+	//isLoadingFile = false;
+
+#if !MULTITHREADED_LOADING
+	triggerAsyncUpdate();
+#endif
+
+}
+
+bool Engine::checkFileVersion(DynamicObject* metaData, bool checkForNewerVersion)
+{
+	if (metaData == nullptr) return false;
+	if (!metaData->hasProperty("version")) return false;
+	AppVersion versionToCheck = checkForNewerVersion ? getAppVersion() : getMinimumRequiredFileVersion();
+	//DBG(metaData->getProperty("version").toString() << " / " << versionToCheck);
+
+	AppVersion fVersion = metaData->getProperty("version").toString();
+
+	if (versionToCheck == fVersion && !checkForNewerVersion) return true;
+
+	return versionToCheck < fVersion;
+}
+
+bool Engine::versionNeedsFormatMigration(const AppVersion& fromVersion) const
+{
+	const AppVersion currentAppVersion(getAppVersion());
+
+	int curVersionRange = 0;
+	for (int i = 0; i < breakingChangesVersions.size(); ++i)
+	{
+		if (currentAppVersion < AppVersion(breakingChangesVersions[i])) break;
+		curVersionRange++;
+	}
+
+	int targetVersionRange = 0;
+	for (int i = 0; i < breakingChangesVersions.size(); ++i)
+	{
+		if (fromVersion < AppVersion(breakingChangesVersions[i])) break;
+		targetVersionRange++;
+	}
+
+	DBG("Cur version range " << curVersionRange << ", target Version range " << targetVersionRange);
+
+	return curVersionRange > targetVersionRange;
+}
+
+String Engine::getMinimumRequiredFileVersion()
+{
+	return "1.0.0";
+}
+
+//#if JUCE_MODAL_LOOPS_PERMITTED
+//File Engine::getSuggestedSaveAsFile (const File& defaultFile){
+//
+//}
+//#endif

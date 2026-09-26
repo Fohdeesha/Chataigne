@@ -1,0 +1,1435 @@
+/*
+  ==============================================================================
+
+	OSCRemoteControl.cpp
+	Created: 23 Apr 2018 5:00:30pm
+	Author:  Ben
+
+  ==============================================================================
+*/
+
+#include "JuceHeader.h"
+juce_ImplementSingleton(OSCRemoteControl)
+
+#if ORGANICUI_USE_WEBSERVER
+#include "OSCPacketHelper.h"
+#include "OSCRemoteControl.h"
+#endif
+
+#ifndef ORGANIC_REMOTE_CONTROL_PORT
+#define ORGANIC_REMOTE_CONTROL_PORT 42000
+#endif
+
+	using namespace juce;
+
+ApplicationProperties& getAppProperties();
+
+OSCRemoteControl::OSCRemoteControl() :
+	EnablingControllableContainer("OSC Remote Control")
+#if ORGANICUI_USE_SERVUS
+	,
+	Thread("Global Zeroconf"),
+	servus("_osc._udp")
+
+#if ORGANICUI_USE_WEBSERVER
+	,
+	oscQueryServus("_oscjson._tcp")
+#endif
+
+#endif
+	,
+	manualSendCC("Manual OSC Send"),
+	localPort(nullptr)
+{
+	saveAndLoadRecursiveData = true; // can be useful when app include other settings there
+
+	showWarningInUI = true;
+
+	enabled->setValue(false);
+
+	localPort = addIntParameter("Local Port", "Local port to connect to for global control over the application", ORGANIC_REMOTE_CONTROL_PORT, 1, 65535);
+	logIncoming = addBoolParameter("Log Incoming", "If checked, this will log incoming messages", false);
+	logOutgoing = addBoolParameter("Log Outgoing", "If checked, this will log outgoing messages", false);
+
+	sendFeedbackOnListen = addBoolParameter("Send update on listen", "Sends feedback with the current controllable value when a client sends a LISTEN command", false);
+	enableSendLogFeedback = addBoolParameter("Send Log Feedback", "If checked, this will send log messages to connected clients", false);
+
+	receiver.addListener(this);
+	receiver.registerFormatErrorHandler(&OSCHelpers::logOSCFormatError);
+
+	manualAddress = manualSendCC.addStringParameter("Address", "Address to send to", "127.0.0.1");
+	manualPort = manualSendCC.addIntParameter("Port", "Port to send to", ORGANIC_REMOTE_CONTROL_PORT + 1, 1, 65535);
+
+	manualSendCC.enabled->setDefaultValue(false);
+	addChildControllableContainer(&manualSendCC);
+}
+
+OSCRemoteControl::~OSCRemoteControl()
+{
+	receiver.disconnect(); //joins the network thread, so nothing is added to the inbox any more
+	cancelPendingUpdate();
+
+#if ORGANICUI_USE_SERVUS
+	stopThread(1000);
+#endif
+
+#if ORGANICUI_USE_WEBSERVER
+	if (server != nullptr)
+	{
+		server->stop();
+		server.reset();
+	}
+	if (WarningReporter::getInstanceWithoutCreating() != nullptr)
+	{
+		WarningReporter::getInstance()->removeAsyncWarningReporterListener(this);
+	}
+#endif
+}
+
+void OSCRemoteControl::setupReceiver()
+{
+	// if (receiveCC == nullptr) return;
+
+	receiver.disconnect();
+	receiverIsConnected = false;
+
+#if ORGANICUI_USE_WEBSERVER
+	updateEngineListener();
+#endif
+
+	if (!enabled->boolValue())
+	{
+#if ORGANICUI_USE_SERVUS
+		setupZeroconf();
+#endif
+
+#if ORGANICUI_USE_WEBSERVER
+		setupServer();
+		updateEngineListener();
+#endif
+		return;
+	}
+
+	// if (!receiveCC->enabled->boolValue()) return;
+	receiverIsConnected = receiver.connect(localPort->intValue());
+
+	if (receiverIsConnected)
+	{
+#if ORGANICUI_USE_WEBSERVER
+		setupServer();
+		updateEngineListener();
+#endif
+
+		NLOG(niceName, "Now receiving on port : " + localPort->stringValue());
+#if ORGANICUI_USE_SERVUS
+		setupZeroconf();
+#endif
+	}
+	else
+	{
+		NLOGERROR(niceName, "Error binding port " + localPort->stringValue());
+	}
+
+	Array<IPAddress> ad;
+	IPAddress::findAllAddresses(ad);
+
+	Array<String> ips;
+	for (auto& a : ad)
+	{
+		ips.add(a.toString());
+	}
+	ips.sort();
+	String s = "Local IPs:";
+	for (auto& ip : ips)
+	{
+		s += String("\n > ") + ip;
+	}
+
+	NLOG(niceName, s);
+}
+
+void OSCRemoteControl::setupManualSender()
+{
+	manualSender.disconnect();
+	updateEngineListener();
+
+	if (!manualSendCC.enabled->boolValue())
+	{
+		return;
+	}
+
+	manualSender.connect(manualAddress->stringValue(), manualPort->intValue());
+	updateEngineListener();
+}
+
+#if ORGANICUI_USE_SERVUS
+void OSCRemoteControl::setupZeroconf()
+{
+	if (Engine::mainEngine->isClearing || localPort == nullptr)
+	{
+		return;
+	}
+	if (!isThreadRunning())
+	{
+		startThread();
+	}
+}
+#endif
+
+void OSCRemoteControl::updateEngineListener()
+{
+#if ORGANICUI_USE_WEBSERVER
+	// Engine::mainEngine->removeAsyncContainerListener(this);
+	Engine::mainEngine->removeControllableContainerListener(this);
+	WarningReporter::getInstance()->removeAsyncWarningReporterListener(this);
+
+	bool shouldListen = false;
+	if (!enabled->boolValue())
+	{
+		return;
+	}
+	if (manualSendCC.enabled->boolValue())
+	{
+		shouldListen = true;
+	}
+	if (receiverIsConnected)
+	{
+		shouldListen = true;
+	}
+
+	// if (shouldListen) Engine::mainEngine->addAsyncContainerListener(this);
+	if (shouldListen)
+	{
+		Engine::mainEngine->addControllableContainerListener(this);
+		WarningReporter::getInstance()->addAsyncWarningReporterListener(this);
+	}
+#endif
+}
+
+void OSCRemoteControl::processMessage(const OSCMessage& m, const String& sourceId)
+{
+	//Everything below walks or changes the object tree, saves, or fires triggers : message thread only. The UDP receiver
+	//already delivers there; anything else (the websocket io thread) is handed over here, in arrival order.
+	if (!MessageManager::getInstance()->isThisTheMessageThread())
+	{
+		OSCMessage copy(m);
+		String sid(sourceId);
+		MessageManager::callAsync([copy, sid]()
+			{
+				if (OSCRemoteControl* rc = getInstanceWithoutCreating()) rc->processMessage(copy, sid);
+			});
+		return;
+	}
+
+	if (Engine::mainEngine == nullptr || Engine::mainEngine->isClearing) return;
+
+	String add = m.getAddressPattern().toString();
+
+	if (logIncoming->boolValue())
+	{
+		String s = add;
+		for (auto& a : m)
+		{
+			s += "\n" + OSCHelpers::getStringArg(a);
+		}
+
+		NLOG(niceName, "Received : " << s);
+	}
+
+	if (add == "/openFile")
+	{
+		if (m.size() < 1)
+		{
+			LOGWARNING("Cannot open file, no argument provided");
+		}
+		else
+		{
+			if (!m[0].isString())
+			{
+				LOGWARNING("Cannot open file, argument #0 is not a string");
+				return;
+			}
+
+			File f(m[0].getString());
+			if (!f.exists())
+			{
+				LOGWARNING("File doesn't exist : " << f.getFullPathName());
+				return;
+			}
+
+			MessageManager::getInstance()->callAsync([f]() { Engine::mainEngine->loadDocument(f); });
+		}
+	}
+	else if (add == "/loadFile")
+	{
+		if (m.size() < 1)
+		{
+			LOGWARNING("Cannot load file, no argument provided");
+		}
+		else
+		{
+			if (!m[0].isString())
+			{
+				LOGWARNING("Cannot load file, argument #0 is not a string");
+				return;
+			}
+
+			var data = JSON::parse(m[0].getString());
+			if (!data.isObject())
+			{
+				LOGWARNING("Cannot load file, argument #0 is not a valid JSON object");
+				return;
+			}
+
+			MessageManager::getInstance()->callAsync(
+				[data]()
+				{
+					Engine::mainEngine->loadJSONData(data, nullptr);
+					Engine::mainEngine->setFile(File());
+				});
+		}
+	}
+	else if (add == "/newFile")
+	{
+		MessageManager::getInstance()->callAsync([]() { Engine::mainEngine->createNewGraph(); });
+	}
+	else if (add == "/saveFile")
+	{
+		if (m.size() >= 1 && m[0].isString())
+		{
+			File f = File::getSpecialLocation(File::userDocumentsDirectory).getNonexistentChildFile(getApp().getApplicationName() + "/" + m[0].getString(), Engine::mainEngine->fileExtension, true);
+
+			MessageManager::callAsync([f]() { Engine::mainEngine->saveAsAsync(f, false, false, false, [](int result) {}); });
+		}
+		else
+		{
+			if (Engine::mainEngine->getFile().existsAsFile())
+			{
+				Engine::mainEngine->saveAsync(false, false, nullptr);
+			}
+			else
+			{
+				File f = File::getSpecialLocation(File::userDocumentsDirectory).getNonexistentChildFile(getApp().getApplicationName() + "/default", Engine::mainEngine->fileExtension, true);
+
+				MessageManager::getInstance()->callAsync([f]() { Engine::mainEngine->saveAsAsync(f, false, false, false, [](int result) {}); });
+			}
+		}
+		LOG("File saved.");
+	}
+	else if (add == "/closeApp")
+	{
+		MessageManager::callAsync([]() { OrganicApplication::quit(); });
+	}
+	else if (add == "/toTray")
+	{
+		MessageManager::callAsync([]() { ((OrganicApplication*) OrganicApplication::getInstance())->mainWindow->closeToTray(); });
+	}
+	else if (add == "/minimize")
+	{
+		MessageManager::callAsync([]() { ((OrganicApplication*) OrganicApplication::getInstance())->mainWindow->setMinimised(true); });
+	}
+	else if (add == "/maximize")
+	{
+		MessageManager::callAsync(
+			[]()
+			{
+				((OrganicApplication*) OrganicApplication::getInstance())->mainWindow->setMinimised(false);
+				((OrganicApplication*) OrganicApplication::getInstance())->mainWindow->openFromTray();
+			});
+	}
+	else if (add == "/syncAll")
+	{
+		sendAllManualFeedback();
+	}
+	else
+	{
+#if ORGANICUI_USE_WEBSERVER
+		Controllable* c = OSCHelpers::findControllable(Engine::mainEngine, m);
+
+		if (c == nullptr)
+		{
+			String addr = m.getAddressPattern().toString();
+			if (addr.contains("/attributes/"))
+			{
+				String splitString = addr.replace("/attributes/", " ");
+				StringArray split = StringArray::fromTokens(splitString, true);
+				if (split.size() == 2 && m.size() >= 1)
+				{
+					if (Controllable* c = Engine::mainEngine->getControllableForAddress(split[0]))
+					{
+						addControllableToNoFeedbackMap(c, sourceId, m.getSenderIPAddress());
+						c->setAttribute(split[1], OSCHelpers::argumentToVar(m[0]));
+						noFeedbackMap.remove(c);
+					}
+				}
+			}
+			else if (addr.endsWith("/resetValue"))
+			{
+				String cAddress = addr.dropLastCharacters(11);
+				if (Controllable* c = Engine::mainEngine->getControllableForAddress(cAddress))
+				{
+					// addControllableToNoFeedbackMap(c, sourceId, m.getSenderIPAddress());
+					if (Parameter* p = dynamic_cast<Parameter*>(c))
+					{
+						p->resetValue();
+					}
+					// noFeedbackMap.remove(c);
+				}
+			}
+		}
+
+		if (c != nullptr)
+		{
+			addControllableToNoFeedbackMap(c, sourceId, m.getSenderIPAddress());
+
+			bool handled = false;
+			if (c->parentContainer != nullptr)
+			{
+				handled = c->parentContainer->handleRemoteControlData(c, m, sourceId);
+			}
+			if (!handled)
+			{
+				OSCHelpers::handleControllableForOSCMessage(c, m);
+			}
+
+			noFeedbackMap.remove(c);
+		}
+#else
+		Controllable* c = OSCHelpers::findControllableAndHandleMessage(Engine::mainEngine, m);
+#endif
+
+		if (c == nullptr)
+		{
+			bool handled = false;
+			if (ControllableContainer* cc = OSCHelpers::findParentContainer(Engine::mainEngine, m.getAddressPattern().toString()))
+			{
+				handled = cc->handleRemoteControlData(m, sourceId);
+			}
+
+			if (!handled)
+			{
+				remoteControlListeners.call(&RemoteControlListener::processMessage, m, sourceId);
+			}
+		}
+	}
+}
+
+void OSCRemoteControl::onContainerParameterChanged(Parameter* p)
+{
+	if (p == enabled || p == localPort)
+	{
+		setupReceiver();
+	}
+#if ORGANICUI_USE_WEBSERVER
+	else if (p == enableSendLogFeedback)
+	{
+		if (enableSendLogFeedback->boolValue())
+		{
+			CustomLogger::getInstance()->addLogListener(this);
+		}
+		else
+		{
+			CustomLogger::getInstance()->removeLogListener(this);
+		}
+	}
+#endif
+}
+
+void OSCRemoteControl::oscMessageReceived(const OSCMessage& m)
+{
+	enqueue(m);
+}
+
+void OSCRemoteControl::oscBundleReceived(const OSCBundle& b)
+{
+	OSCHelpers::forEachMessageInBundle(b, [this](const OSCMessage& m) { enqueue(m); });
+}
+
+void OSCRemoteControl::enqueue(const OSCMessage& m, const String& sourceId)
+{
+	{
+		const ScopedLock sl(inboxLock);
+		if ((int)inbox.size() >= maxInboxSize)
+		{
+			droppedMessages++;
+			return;
+		}
+		inbox.push_back({ m, sourceId });
+	}
+	triggerAsyncUpdate();
+}
+
+void OSCRemoteControl::handleAsyncUpdate()
+{
+	//in arrival order, but a limited time per pass : the rest is picked up by the next pass, so painting, timers and the
+	//rest of the message queue keep running during a flood
+	const double start = Time::getMillisecondCounterHiRes();
+	bool more = false;
+
+	while (true)
+	{
+		std::unique_ptr<Received> r;
+		{
+			const ScopedLock sl(inboxLock);
+			if (inbox.empty()) break;
+			r.reset(new Received(std::move(inbox.front())));
+			inbox.pop_front();
+		}
+
+		//UDP input follows the Enabled switch ; the websocket belongs to the server, which only exists while enabled
+		if ((enabled->boolValue() || r->sourceId.isNotEmpty()) && Engine::mainEngine != nullptr && !Engine::mainEngine->isClearing) processMessage(r->message, r->sourceId);
+
+		if (Time::getMillisecondCounterHiRes() - start > 20)
+		{
+			const ScopedLock sl(inboxLock);
+			more = !inbox.empty();
+			break;
+		}
+	}
+
+	if (more) triggerAsyncUpdate();
+
+	int dropped = 0;
+	{
+		const ScopedLock sl(inboxLock);
+		const uint32 now = Time::getMillisecondCounter();
+		if (droppedMessages > 0 && now - lastDropWarning > 5000)
+		{
+			dropped = droppedMessages;
+			droppedMessages = 0;
+			lastDropWarning = now;
+		}
+	}
+	if (dropped > 0) NLOGWARNING(niceName, "Dropped " << dropped << " incoming message(s) : they arrived faster than they could be handled");
+}
+
+#if ORGANICUI_USE_SERVUS
+void OSCRemoteControl::run()
+{
+	String nameToAdvertise = OrganicApplication::getInstance()->getApplicationName() + " - Remote Control";
+	int portToAdvertise = 0;
+	bool isEnabled = enabled->boolValue() && !Engine::mainEngine->isClearing;
+
+	while ((portToAdvertise != localPort->intValue() || isEnabled != enabled->boolValue()) && !threadShouldExit())
+	{
+		portToAdvertise = localPort->intValue();
+		isEnabled = enabled->boolValue();
+
+		servus.withdraw();
+
+		if (isEnabled)
+		{
+			servus.announce(portToAdvertise, nameToAdvertise.toStdString());
+		}
+
+#if ORGANICUI_USE_WEBSERVER
+		oscQueryServus.withdraw();
+		if (isEnabled)
+		{
+			oscQueryServus.announce(portToAdvertise, nameToAdvertise.toStdString());
+		}
+#endif
+
+		if (localPort->intValue() != portToAdvertise)
+		{
+			DBG("Name or port changed during advertise, readvertising");
+		}
+	}
+
+	NLOG(niceName, "Zeroconf service created : " << nameToAdvertise << ":" << portToAdvertise);
+}
+#endif // SERVUS
+
+#if ORGANICUI_USE_WEBSERVER
+void OSCRemoteControl::setupServer()
+{
+	if (!enabled->boolValue())
+	{
+		if (server != nullptr)
+		{
+			server->stop();
+			server.reset();
+		}
+		return;
+	}
+
+	server.reset(new SimpleWebSocketServer());
+	server->addHTTPRequestHandler(this);
+	server->addWebSocketListener(this);
+	server->start(localPort->intValue());
+}
+
+bool OSCRemoteControl::handleHTTPRequest(std::shared_ptr<HttpServer::Response> response, std::shared_ptr<HttpServer::Request> request)
+{
+	//The answer is read from the live object tree, which a load, an undo or a delete on the message thread can free
+	//under this io thread : build it there and wait. The wait gives up when the server is being stopped (stop() runs
+	//on the message thread and waits for this thread to return) or after a while, so it can never hang either side.
+	struct Job
+	{
+		juce::WaitableEvent done;
+		var data;
+		bool downloadMode = false;
+		String downloadFileName;
+	};
+
+	auto job = std::make_shared<Job>();
+	const String path(request->path);
+	const String query(request->query_string);
+
+	MessageManager::callAsync([job, path, query]()
+		{
+			if (OSCRemoteControl* rc = getInstanceWithoutCreating())
+			{
+				if (Engine::mainEngine != nullptr) job->data = rc->buildHTTPData(path, query, job->downloadMode, job->downloadFileName);
+			}
+			job->done.signal();
+		});
+
+	int waitedMs = 0;
+	while (!job->done.wait(50))
+	{
+		waitedMs += 50;
+		if (Thread::currentThreadShouldExit() || waitedMs >= 10000)
+		{
+			SimpleWeb::CaseInsensitiveMultimap header;
+			header.emplace("Access-Control-Allow-Origin", "*");
+			response->write(SimpleWeb::StatusCode::server_error_service_unavailable, "The application is busy, try again", header);
+			return true;
+		}
+	}
+
+	const var& data = job->data;
+	const bool downloadMode = job->downloadMode;
+	const String downloadFileName = job->downloadFileName;
+
+	String dataStr = JSON::toString(data);
+
+	SimpleWeb::CaseInsensitiveMultimap header;
+	header.emplace("Content-Length", String(dataStr.getNumBytesAsUTF8()).toStdString());
+	header.emplace("Content-Type", downloadMode ? "force-download" : "application/json");
+	if (downloadMode)
+	{
+		header.emplace("Content-Disposition", (String("attachment; filename=\"") + downloadFileName + "\"").toStdString());
+	}
+	header.emplace("Accept-range", "bytes");
+	header.emplace("Access-Control-Allow-Origin", "*");
+
+	response->write(SimpleWeb::StatusCode::success_ok, header);
+	*response << dataStr;
+
+	return true;
+}
+
+var OSCRemoteControl::buildHTTPData(const String& path, const String& query, bool& downloadMode, String& downloadFileName)
+{
+	downloadMode = false;
+	downloadFileName = "sessionFile.json";
+
+	var data;
+	if (query.contains("HOST_INFO"))
+	{
+		var extensionData(new DynamicObject());
+		extensionData.getDynamicObject()->setProperty("ACCESS", true);
+		extensionData.getDynamicObject()->setProperty("CLIPMODE", false);
+		extensionData.getDynamicObject()->setProperty("CRITICAL", false);
+		extensionData.getDynamicObject()->setProperty("RANGE", true);
+		extensionData.getDynamicObject()->setProperty("TAGS", false);
+		extensionData.getDynamicObject()->setProperty("TYPE", true);
+		extensionData.getDynamicObject()->setProperty("UNIT", false);
+		extensionData.getDynamicObject()->setProperty("VALUE", true);
+		extensionData.getDynamicObject()->setProperty("LISTEN", true);
+		extensionData.getDynamicObject()->setProperty("PATH_ADDED", true);
+		extensionData.getDynamicObject()->setProperty("PATH_REMOVED", true);
+		extensionData.getDynamicObject()->setProperty("PATH_RENAMED", true);
+		extensionData.getDynamicObject()->setProperty("PATH_CHANGED", false);
+
+		data = new DynamicObject();
+		data.getDynamicObject()->setProperty("EXTENSIONS", extensionData);
+		String s = String(ProjectInfo::projectName) + " - " + Engine::mainEngine->getDocumentTitle();
+		data.getDynamicObject()->setProperty("NAME", s);
+		data.getDynamicObject()->setProperty("OSC_PORT", localPort->intValue());
+		data.getDynamicObject()->setProperty("OSC_TRANSPORT", "UDP");
+
+		var metaData(new DynamicObject());
+		data.getDynamicObject()->setProperty("METADATA", metaData);
+		metaData.getDynamicObject()->setProperty("os", SystemStats::getOperatingSystemName());
+		metaData.getDynamicObject()->setProperty("version", ProjectInfo::versionString);
+		metaData.getDynamicObject()->setProperty("versionNumber", ProjectInfo::versionNumber);
+		metaData.getDynamicObject()->setProperty("fileName", Engine::mainEngine->getFile().getFileName());
+		metaData.getDynamicObject()->setProperty("filePath", Engine::mainEngine->getFile().getFullPathName());
+		metaData.getDynamicObject()->setProperty("fileModificationTime", Engine::mainEngine->getFile().getLastModificationTime().toISO8601(true));
+		metaData.getDynamicObject()->setProperty("sessionModificationTime", Engine::mainEngine->lastChangeTime.toISO8601(true));
+		if (fillHostInfoMetaDataFunc != nullptr)
+		{
+			fillHostInfoMetaDataFunc(metaData);
+		}
+	}
+	else if (path == "/sessionFile")
+	{
+		data = Engine::mainEngine->getJSONData();
+		downloadMode = true;
+		if (Engine::mainEngine->getFile().existsAsFile())
+		{
+			downloadFileName = Engine::mainEngine->getFile().getFileName();
+		}
+	}
+	else if (path == "/recentFiles")
+	{
+		RecentlyOpenedFilesList recentFiles;
+		recentFiles.restoreFromString(getAppProperties().getUserSettings()->getValue("recentFiles"));
+		data = new DynamicObject();
+		var recentFilesData;
+		for (int i = 0; i < recentFiles.getNumFiles(); i++)
+		{
+			var fData(new DynamicObject());
+			fData.getDynamicObject()->setProperty("name", recentFiles.getFile(i).getFileName());
+			fData.getDynamicObject()->setProperty("path", recentFiles.getFile(i).getFullPathName());
+			fData.getDynamicObject()->setProperty("modificationTime", recentFiles.getFile(i).getLastModificationTime().toISO8601(true));
+			recentFilesData.append(fData);
+			data.getDynamicObject()->setProperty("recentFiles", recentFilesData);
+		}
+	}
+	else if (path == "/autosaveFiles")
+	{
+		String curFileName = Engine::mainEngine->getFile().getFileNameWithoutExtension();
+		if (curFileName.isEmpty())
+		{
+			data = new DynamicObject();
+			data.getDynamicObject()->setProperty("autosaveFiles", var());
+		}
+		else
+		{
+			File autoSaveDir = Engine::mainEngine->getFile().getParentDirectory().getChildFile(curFileName + "_autosave");
+			autoSaveDir.createDirectory();
+			Array<File> files = autoSaveDir.findChildFiles(File::findFiles, false, "*" + Engine::mainEngine->fileExtension);
+			std::sort(files.begin(), files.end(), [](const File& a, const File& b) { return a.getLastModificationTime() > b.getLastModificationTime(); });
+
+			data = new DynamicObject();
+			var autoSaveFilesData;
+			for (auto& f : files)
+			{
+				var fData(new DynamicObject());
+				fData.getDynamicObject()->setProperty("name", f.getFileName());
+				fData.getDynamicObject()->setProperty("path", f.getFullPathName());
+				fData.getDynamicObject()->setProperty("modificationTime", f.getLastModificationTime().toISO8601(true));
+				autoSaveFilesData.append(fData);
+			}
+			data.getDynamicObject()->setProperty("autosaveFiles", autoSaveFilesData);
+		}
+	}
+	else
+	{
+		ControllableContainer* cc = Engine::mainEngine;
+		String addr = path;
+		if (addr.length() > 1)
+		{
+			cc = Engine::mainEngine->getControllableContainerForAddress(addr, true, false, false);
+		}
+		if (cc != nullptr)
+		{
+			data = cc->getRemoteControlData();
+		}
+		else
+		{
+			// try to find a controllable with that address, in case it's not a container
+			Controllable* c = Engine::mainEngine->getControllableForAddress(addr, true);
+			if (c != nullptr)
+			{
+				data = c->getRemoteControlData();
+			}
+		}
+	}
+
+	return data;
+}
+
+void OSCRemoteControl::serverInitSuccess()
+{
+	//io thread
+	LOG("Server started on port " << server->port);
+	MessageManager::callAsync([]()
+		{
+			if (OSCRemoteControl* rc = getInstanceWithoutCreating()) rc->clearWarning("server");
+		});
+}
+
+void OSCRemoteControl::serverInitError(const String& message)
+{
+	//io thread : the warning and the retry belong to the message thread
+	const int port = server != nullptr ? server->port : localPort->intValue();
+	MessageManager::callAsync([port]()
+		{
+			OSCRemoteControl* rc = getInstanceWithoutCreating();
+			if (rc == nullptr) return;
+			rc->setWarningMessage("Error starting server on port " + String(port) + ", trying again every 5 seconds..", "server");
+			Timer::callAfterDelay(5000, []() { if (OSCRemoteControl* r = getInstanceWithoutCreating()) r->setupServer(); });
+		});
+}
+
+// The websocket callbacks run on the server's io thread. They only copy what they received and hand it to the
+// message thread, in order (a connection's LISTEN always lands after its open, its close after both).
+
+void OSCRemoteControl::connectionOpened(const String& id)
+{
+	MessageManager::callAsync([id]()
+		{
+			if (OSCRemoteControl* rc = getInstanceWithoutCreating()) rc->handleConnectionOpened(id);
+		});
+}
+
+void OSCRemoteControl::handleConnectionOpened(const String& id)
+{
+	NLOG(niceName, "Got a connection from " << id);
+	remoteControlListeners.call(&RemoteControlListener::clientConnected, id);
+	feedbackMap.set(id, Array<Controllable*>()); // Reset feedbacks
+
+	// Send all existing persistent warnings
+	for (auto& wt : WarningReporter::getInstance()->targets)
+	{
+		if (wt == nullptr || wt.wasObjectDeleted())
+		{
+			continue;
+		}
+
+		String address = "";
+		if (Controllable* c = dynamic_cast<Controllable*>(wt.get()))
+		{
+			address = c->getControlAddress();
+		}
+		else if (ControllableContainer* cc = dynamic_cast<ControllableContainer*>(wt.get()))
+		{
+			address = cc->getControlAddress();
+		}
+		else
+		{
+			continue;
+		}
+
+		HashMap<String, String>::Iterator it(wt->warningMessage);
+		while (it.next())
+		{
+			sendPersistentWarningFeedback(address, it.getKey(), it.getValue());
+		}
+	}
+}
+
+void OSCRemoteControl::messageReceived(const String& id, const String& message)
+{
+	var o = JSON::parse(message);
+	if (!o.isObject()) return;
+
+	MessageManager::callAsync([id, o]()
+		{
+			OSCRemoteControl* rc = getInstanceWithoutCreating();
+			if (rc == nullptr || Engine::mainEngine == nullptr || Engine::mainEngine->isClearing) return;
+			if (o.hasProperty("COMMAND")) rc->handleCommand(id, o);
+			else rc->handleValues(o);
+		});
+}
+
+void OSCRemoteControl::handleCommand(const String& id, const var& o)
+{
+	String command = o["COMMAND"];
+	var data = o["DATA"];
+
+	if (command == "ADD")
+	{
+		if (ControllableContainer* cc = Engine::mainEngine->getControllableContainerForAddress(data["address"].toString(), true))
+		{
+			cc->handleAddFromRemoteControl(data);
+		}
+	}
+	else if (command == "REMOVE")
+	{
+		if (ControllableContainer* cc = Engine::mainEngine->getControllableContainerForAddress(data["address"].toString(), true))
+		{
+			cc->handleRemoveFromRemoteControl();
+		}
+	}
+	else if (command == "RENAME")
+	{
+		if (ControllableContainer* cc = Engine::mainEngine->getControllableContainerForAddress(data["address"].toString(), true))
+		{
+			cc->setUndoableNiceName(data["name"]);
+		}
+	}
+	else if (command == "LOAD")
+	{
+		var fileData = JSON::parse(data["data"]);
+
+		if (fileData.isObject())
+		{
+			String addr = data.getProperty("address", "/");
+			ControllableContainer* cc = addr == "/" ? Engine::mainEngine : Engine::mainEngine->getControllableContainerForAddress(data["address"].toString(), true);
+			if (cc != nullptr)
+			{
+				WeakReference<ControllableContainer> weakCC(cc); //the container can be gone by the time this runs
+				MessageManager::callAsync([weakCC, fileData]() { if (ControllableContainer* c = weakCC.get()) c->handleLoadFromRemoteControl(fileData); });
+			}
+		}
+	}
+	else if (command == "RESTORE")
+	{
+		const bool declined = data.getProperty("declined", false);
+		if (!declined)
+		{
+			File f = File(data.getProperty("file", ""));
+			if (f.existsAsFile())
+			{
+				MessageManager::callAsync(
+					[f]()
+					{
+						Engine::mainEngine->dismissRestoreAutosaveAlertWindow();
+						Engine::mainEngine->restoreAutosave(Engine::mainEngine->getFile(), f);
+					});
+			}
+		}
+		else
+		{
+			MessageManager::callAsync(
+				[]()
+				{
+					Engine::mainEngine->dismissRestoreAutosaveAlertWindow();
+					Engine::mainEngine->removeNewerAutosaves();
+					Engine::mainEngine->loadDocumentNoCheck(Engine::mainEngine->getFile());
+				});
+		}
+	}
+	else if (command == "SAVE")
+	{
+		String addr = data.getProperty("address", "/");
+		ControllableContainer* cc = addr == "/" ? Engine::mainEngine : Engine::mainEngine->getControllableContainerForAddress(data["address"].toString(), true);
+		if (cc != nullptr)
+		{
+			var saveData = cc->handleSaveFromRemoteControl();
+			if (saveData.isObject())
+			{
+				var msg(new DynamicObject());
+				msg.getDynamicObject()->setProperty("COMMAND", "SAVE");
+				var datamsg(new DynamicObject());
+				datamsg.getDynamicObject()->setProperty("address", data["address"]);
+				datamsg.getDynamicObject()->setProperty("data", saveData);
+				msg.getDynamicObject()->setProperty("DATA", datamsg);
+				if (server != nullptr) server->sendTo(JSON::toString(msg), id);
+			}
+		}
+	}
+	else if (command == "UNDO")
+	{
+		UndoMaster::getInstance()->undo();
+	}
+	else if (command == "REDO")
+	{
+		UndoMaster::getInstance()->redo();
+	}
+	else if (command == "LOG")
+	{
+		if (data.hasProperty("type"))
+		{
+			if (data["type"] == "info")
+			{
+				NLOG(niceName, data["message"].toString());
+			}
+			else if (data["type"] == "warning")
+			{
+				NLOGWARNING(niceName, data["message"].toString());
+			}
+			else if (data["type"] == "error")
+			{
+				NLOGERROR(niceName, data["message"].toString());
+			}
+			else
+			{
+				NLOG(niceName, data["message"].toString());
+			}
+		}
+		else
+		{
+			NLOG(niceName, data.toString());
+		}
+	}
+	String cAddress = "";
+	if (data.isString())
+	{
+		cAddress = data.toString();
+	}
+	else if (data.isArray() && data.size() > 0)
+	{
+		cAddress = data[0].toString();
+	}
+	else if (data.isObject() && data.hasProperty("address"))
+	{
+		cAddress = data["address"].toString();
+	}
+
+	if (Controllable* c = Engine::mainEngine->getControllableForAddress(cAddress))
+	{
+		if (command == "LISTEN" && c->hideInRemoteControl)
+		{
+			//left out of the listing on purpose (a password, an API token) : its feedback would carry the plain value
+			NLOGWARNING(niceName, "Not listening to " << cAddress << " : it is hidden from the remote control");
+		}
+		else if (command == "LISTEN")
+		{
+			{
+				const ScopedLock sl(feedbackMap.getLock());
+				if (!feedbackMap.contains(id)) feedbackMap.set(id, Array<Controllable*>());
+				(&(feedbackMap.getReference(id)))->addIfNotAlreadyThere(c);
+			}
+			bool sendFeedback = sendFeedbackOnListen->boolValue();
+			if (data.isArray() && data.size() > 1)
+			{
+				sendFeedback = data[1];
+			}
+			else if (data.isObject() && data.hasProperty("sendFeedback"))
+			{
+				sendFeedback = data["sendFeedback"];
+			}
+			if (sendFeedback)
+			{
+				sendOSCQueryFeedback(c);
+			}
+		}
+		else if (command == "IGNORE")
+		{
+			const ScopedLock sl(feedbackMap.getLock());
+			if (feedbackMap.contains(id)) (&(feedbackMap.getReference(id)))->removeAllInstancesOf(c);
+		}
+	}
+}
+
+void OSCRemoteControl::handleValues(const var& o)
+{
+	NamedValueSet nvs = o.getDynamicObject()->getProperties();
+	for (auto& nv : nvs)
+	{
+		if (Controllable* c = Engine::mainEngine->getControllableForAddress(nv.name.toString()))
+		{
+			if (c->type == Controllable::TRIGGER)
+			{
+				((Trigger*) c)->trigger();
+			}
+			else
+			{
+				((Parameter*) c)->setValue(nv.value);
+			}
+		}
+		else if (nv.name.toString().startsWith("undoable:") && nv.value.size() == 2)
+		{
+			String cName = nv.name.toString().fromFirstOccurrenceOf(":", false, false);
+			if (Parameter* p = dynamic_cast<Parameter*>(Engine::mainEngine->getControllableForAddress(cName)))
+			{
+				if (nv.value.size() == 2)
+				{
+					p->setUndoableValue(nv.value[0], nv.value[1]);
+				}
+			}
+		}
+		else if (nv.name.toString().startsWith("undoables:"))
+		{
+			String actionName = nv.name.toString().fromFirstOccurrenceOf(":", false, false);
+			if (nv.value.isObject())
+			{
+				NamedValueSet paramVS = nv.value.getDynamicObject()->getProperties();
+				Array<UndoableAction*> actions;
+				for (auto& pnv : paramVS)
+				{
+					if (Parameter* p = dynamic_cast<Parameter*>(Engine::mainEngine->getControllableForAddress(pnv.name.toString())))
+					{
+						if (pnv.value.size() == 2)
+						{
+							actions.add(p->setUndoableValue(pnv.value[0], pnv.value[1], true));
+						}
+					}
+				}
+				UndoMaster::getInstance()->performActions(actionName.isEmpty() ? "Set " + String(actions.size()) + " values from remote" : actionName, actions);
+			}
+		}
+		else if (nv.name.toString().contains("/attributes/"))
+		{
+			//split on the separator itself : fromTokens would split on each of its characters
+			const String cAddress = nv.name.toString().upToFirstOccurrenceOf("/attributes/", false, false);
+			const String attribute = nv.name.toString().fromFirstOccurrenceOf("/attributes/", false, false);
+			if (attribute.isNotEmpty())
+			{
+				if (Controllable* c = Engine::mainEngine->getControllableForAddress(cAddress)) c->setAttribute(attribute, nv.value);
+			}
+		}
+	}
+}
+
+void OSCRemoteControl::dataReceived(const String& id, const MemoryBlock& data)
+{
+	//io thread : parse here (anyone on the network can send anything, and a parse error must not take the server
+	//thread down with it), then hand the message to the message thread through the same bounded inbox as UDP
+	std::unique_ptr<OSCMessage> m;
+	try
+	{
+		m.reset(new OSCMessage(OSCPacketParser(data.getData(), data.getSize()).readMessage()));
+	}
+	catch (const OSCException& e)
+	{
+		NLOGWARNING(niceName, "Invalid OSC data from " << id << " : " << e.description);
+		return;
+	}
+
+	enqueue(*m, id);
+}
+
+void OSCRemoteControl::connectionClosed(const String& id, int status, const String& reason)
+{
+	MessageManager::callAsync([id, status, reason]()
+		{
+			if (OSCRemoteControl* rc = getInstanceWithoutCreating()) rc->handleConnectionClosed(id, status, reason, false);
+		});
+}
+
+void OSCRemoteControl::connectionError(const String& id, int status, const String& message)
+{
+	MessageManager::callAsync([id, status, message]()
+		{
+			if (OSCRemoteControl* rc = getInstanceWithoutCreating()) rc->handleConnectionClosed(id, status, message, true);
+		});
+}
+
+void OSCRemoteControl::handleConnectionClosed(const String& id, int status, const String& reason, bool isError)
+{
+	remoteControlListeners.call(&RemoteControlListener::clientDisconnected, id, reason);
+	if (isError) NLOGERROR(niceName, "Connection error from " << id << " : " << reason);
+	else NLOG(niceName, "Connection close from " << id << " : " << status << " (" << reason << ")");
+	feedbackMap.remove(id);
+}
+
+void OSCRemoteControl::onControllableFeedbackUpdate(ControllableContainer* cc, Controllable* c)
+{
+	if (cc == &manualSendCC)
+	{
+		setupManualSender();
+	}
+}
+
+void OSCRemoteControl::sendPathAddedFeedback(const String& path)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "PATH_ADDED");
+	msg.getDynamicObject()->setProperty("DATA", path);
+	server->send(JSON::toString(msg));
+}
+
+void OSCRemoteControl::sendPathRemovedFeedback(const String& path)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "PATH_REMOVED");
+	msg.getDynamicObject()->setProperty("DATA", path);
+	server->send(JSON::toString(msg));
+}
+
+void OSCRemoteControl::sendPathNameChangedFeedback(const String& oldPath, const String& newPath)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "PATH_RENAMED");
+	var data(new DynamicObject());
+	data.getDynamicObject()->setProperty("OLD", oldPath);
+	data.getDynamicObject()->setProperty("NEW", newPath);
+	msg.getDynamicObject()->setProperty("DATA", data);
+	server->send(JSON::toString(msg));
+}
+
+void OSCRemoteControl::sendPathChangedFeedback(const String& path)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "PATH_CHANGED");
+	msg.getDynamicObject()->setProperty("DATA", path);
+	server->send(JSON::toString(msg));
+}
+
+bool OSCRemoteControl::hasClient(const String& id)
+{
+	if (server == nullptr)
+	{
+		return false;
+	}
+	return server->connectionMap.contains(id);
+}
+
+void OSCRemoteControl::newMessage(const CustomLogger::LogEvent& e)
+{
+	if (Engine::mainEngine != nullptr && Engine::mainEngine->isClearing)
+	{
+		return;
+	}
+	if (enableSendLogFeedback != nullptr && !enableSendLogFeedback->boolValue())
+	{
+		return;
+	}
+
+	sendLogFeedback(e.severityName, e.source, e.content);
+}
+
+void OSCRemoteControl::sendLogFeedback(const String& type, const String& source, const String& message)
+{
+	if (!enabled->boolValue() || server == nullptr)
+	{
+		return;
+	}
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "LOG");
+	var data(new DynamicObject());
+	data.getDynamicObject()->setProperty("type", type);
+	data.getDynamicObject()->setProperty("source", source);
+	data.getDynamicObject()->setProperty("message", message);
+	msg.getDynamicObject()->setProperty("DATA", data);
+	server->send(JSON::toString(msg));
+}
+
+void OSCRemoteControl::sendPersistentWarningFeedback(const String& emitterAddress, const String& warningID, const juce::String& warningMessage)
+{
+	jassert(emitterAddress.isNotEmpty());
+
+	if (server == nullptr)
+	{
+		return;
+	}
+
+	if (Engine::mainEngine != nullptr && Engine::mainEngine->isClearing)
+	{
+		return;
+	}
+
+	var data(new DynamicObject());
+	data.getDynamicObject()->setProperty("source", emitterAddress);
+	data.getDynamicObject()->setProperty("id", warningID);
+	data.getDynamicObject()->setProperty("message", warningMessage);
+	// TODO: Send the event type as well so clients can decide how to handle them
+
+	var msg(new DynamicObject());
+	msg.getDynamicObject()->setProperty("COMMAND", "WARNING");
+	msg.getDynamicObject()->setProperty("DATA", data);
+
+	server->send(JSON::toString(msg));
+}
+
+void OSCRemoteControl::controllableFeedbackUpdate(ControllableContainer* cc, Controllable* c)
+{
+	EnablingControllableContainer::controllableFeedbackUpdate(cc, c);
+
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	// OSCQuery
+	const ScopedLock sl(feedbackMap.getLock()); //also reached from the thread that fired a trigger
+	HashMap<String, Array<Controllable*>, DefaultHashFunctions, CriticalSection>::Iterator it(feedbackMap);
+	while (it.next())
+	{
+		if (it.getValue().contains(c))
+		{
+			sendOSCQueryFeedback(c);
+		}
+	}
+
+	// Manual
+	sendManualFeedbackForControllable(c);
+}
+
+void OSCRemoteControl::controllableStateUpdate(ControllableContainer* cc, Controllable* c)
+{
+	EnablingControllableContainer::controllableStateUpdate(cc, c);
+
+	if (Engine::mainEngine != nullptr && (Engine::mainEngine->isLoadingFile || Engine::mainEngine->isClearing))
+	{
+		return;
+	}
+
+	// OSCQuery
+	const ScopedLock sl(feedbackMap.getLock()); //also reached from the thread that fired a trigger
+	HashMap<String, Array<Controllable*>, DefaultHashFunctions, CriticalSection>::Iterator it(feedbackMap);
+	while (it.next())
+	{
+		if (it.getValue().contains(c))
+		{
+			sendOSCQueryStateFeedback(c);
+		}
+	}
+}
+
+void OSCRemoteControl::addControllableToNoFeedbackMap(Controllable* c, const juce::String& id, const juce::String& fallbackId)
+{
+	if (id.isEmpty())
+	{
+		const ScopedLock sl(feedbackMap.getLock());
+		HashMap<String, Array<Controllable*>, DefaultHashFunctions, CriticalSection>::Iterator it(feedbackMap);
+		while (it.next())
+		{
+			if (it.getKey().contains(fallbackId))
+			{
+				noFeedbackMap.set(c, it.getKey());
+				break;
+			}
+		}
+	}
+	else
+	{
+		noFeedbackMap.set(c, id);
+	}
+}
+
+void OSCRemoteControl::sendOSCQueryFeedback(Controllable* c, const String& excludeId)
+{
+	if (c == nullptr)
+	{
+		return;
+	}
+
+	OSCMessage m = OSCHelpers::getOSCMessageForControllable(c);
+	StringArray ex = excludeId;
+	if (noFeedbackMap.contains(c))
+	{
+		ex.add(noFeedbackMap[c]);
+	}
+	sendOSCQueryFeedback(m, ex);
+}
+
+void OSCRemoteControl::sendOSCQueryStateFeedback(Controllable* c, const String& excludeId)
+{
+	if (c == nullptr)
+	{
+		return;
+	}
+
+	OSCMessage m(c->getControlAddress() + "/attributes/enabled");
+	m.addBool(c->enabled);
+	StringArray ex = excludeId;
+	if (noFeedbackMap.contains(c))
+	{
+		ex.add(noFeedbackMap[c]);
+	}
+	sendOSCQueryFeedback(m, ex);
+}
+
+void OSCRemoteControl::sendOSCQueryFeedback(const OSCMessage& m, StringArray excludes)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+
+	OSCPacketPacker packer;
+	if (packer.writeMessage(m))
+	{
+		MemoryBlock b(packer.getData(), packer.getDataSize());
+		server->sendExclude(b, excludes);
+	}
+
+	if (logOutgoing->boolValue())
+	{
+		NLOG(niceName, "Sent to OSCQuery : " << OSCHelpers::messageToString(m));
+	}
+}
+
+void OSCRemoteControl::sendOSCQueryFeedbackTo(const OSCMessage& m, StringArray ids)
+{
+	if (server == nullptr)
+	{
+		return;
+	}
+
+	OSCPacketPacker packer;
+	if (packer.writeMessage(m))
+	{
+		MemoryBlock b(packer.getData(), packer.getDataSize());
+		for (auto& id : ids)
+		{
+			server->sendTo(b, id);
+		}
+	}
+
+	if (logOutgoing->boolValue())
+	{
+		NLOG(niceName, "Sent to OSCQuery : " << OSCHelpers::messageToString(m));
+	}
+}
+
+void OSCRemoteControl::newMessage(const WarningReporter::WarningReporterEvent& e)
+{
+	if (e.targetAddress.isEmpty())
+	{
+		return;
+	}
+
+	sendPersistentWarningFeedback(e.targetAddress, e.warningID, e.message);
+}
+
+#endif
+
+void OSCRemoteControl::sendAllManualFeedback()
+{
+	if (!manualSendCC.enabled->boolValue())
+	{
+		return;
+	}
+
+	Array<WeakReference<Controllable>> allControllables = Engine::mainEngine->getAllControllables(true);
+	for (auto& c : allControllables)
+	{
+		sendManualFeedbackForControllable(c);
+	}
+}
+
+void OSCRemoteControl::sendManualFeedbackForControllable(Controllable* c)
+{
+	if (!manualSendCC.enabled->boolValue())
+	{
+		return;
+	}
+	if (c == nullptr || c->hideInRemoteControl)
+	{
+		return;
+	}
+	OSCMessage m = OSCHelpers::getOSCMessageForControllable(c);
+
+	manualSender.send(m);
+
+	if (logOutgoing->boolValue())
+	{
+		NLOG(niceName, "Sent to manual OSC  : " << OSCHelpers::messageToString(m));
+	}
+}

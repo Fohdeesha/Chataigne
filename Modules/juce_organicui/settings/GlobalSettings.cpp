@@ -1,0 +1,379 @@
+/*
+  ==============================================================================
+
+	GlobalSettings.cpp
+	Created: 3 Jan 2018 3:52:13pm
+	Author:  Ben
+
+  ==============================================================================
+*/
+
+#include "JuceHeader.h"
+#include "GlobalSettings.h"
+
+juce_ImplementSingleton(GlobalSettings)
+
+ApplicationCommandManager& getCommandManager();
+
+namespace
+{
+using SafeComponent = Component::SafePointer<Component>;
+
+void relayoutComponentTree(Component& component)
+{
+	SafeComponent safeComponent(&component);
+	component.resized();
+
+	if (safeComponent == nullptr) return;
+
+	if (auto* cachedImage = component.getCachedComponentImage())
+		cachedImage->invalidateAll();
+
+	std::vector<SafeComponent> children;
+	children.reserve((size_t)component.getNumChildComponents());
+
+	for (int i = 0; i < component.getNumChildComponents(); ++i)
+		children.emplace_back(component.getChildComponent(i));
+
+	for (auto& child : children)
+		if (child != nullptr) relayoutComponentTree(*child);
+
+	if (safeComponent != nullptr) component.repaint();
+}
+
+void relayoutAndRepaintTopLevelWindows()
+{
+	std::vector<SafeComponent> windows;
+	windows.reserve((size_t)TopLevelWindow::getNumTopLevelWindows());
+
+	for (int i = 0; i < TopLevelWindow::getNumTopLevelWindows(); ++i)
+		windows.emplace_back(TopLevelWindow::getTopLevelWindow(i));
+
+	for (auto& window : windows)
+	{
+		if (window == nullptr) continue;
+
+		relayoutComponentTree(*window);
+
+		if (window != nullptr)
+			if (auto* peer = window->getPeer()) peer->performAnyPendingRepaintsNow();
+	}
+}
+}
+
+GlobalSettings::GlobalSettings() :
+	ControllableContainer("Global Settings"),
+	startupCC("Startup and Update"),
+	interfaceCC("Interface"),
+	saveLoadCC("Save and Load"),
+	editingCC("Editing"),
+	launchArguments("Launch Arguments")
+{
+
+	jassert(Engine::mainEngine != nullptr); //Must not call GlobalSettings::getInstance() before creating the engine !
+
+	saveAndLoadRecursiveData = true;
+	hideInRemoteControl = true;
+	defaultHideInRemoteControl = true;
+
+#if JUCE_WINDOWS
+	launchOnStartup = startupCC.addBoolParameter("Launch on system startup", "If checked, this app will automatically launch on system startup", false);
+#endif
+
+	launchMinimised = startupCC.addBoolParameter("Launch minimized", "If checked, this app will automatically minimized it self when launched", false);
+	allowMultipleInstances = startupCC.addBoolParameter("Allow Multiple Instances", "If checked, it will be possible to launch multiple instances of this application at the same time (not working on Mac, you would have to actually duplicate the app)", false);
+	checkUpdatesOnStartup = startupCC.addBoolParameter("Check updates on startup", "If enabled, app will check if any updates are available", true);
+	updateChannel = startupCC.addEnumParameter("Update Channel", "Channel to pull software updates from");
+	updateChannel->addOption("Stable", "stableversion")->addOption("Beta", "betaversion");
+	const String& currentUpdateChannel = Engine::mainEngine->updateChannel;
+	if (currentUpdateChannel != "stableversion" && currentUpdateChannel != "betaversion")
+	{
+		updateChannel->addOption(currentUpdateChannel, currentUpdateChannel);
+	}
+	updateChannel->setValueWithData(currentUpdateChannel);
+
+	updateHelpOnStartup = startupCC.addBoolParameter("Update help on startup", "If enabled, app will try and download the last help file locally", true);
+
+	openLastDocumentOnStartup = startupCC.addBoolParameter("Load last " + (Engine::mainEngine != nullptr ? Engine::mainEngine->fileExtension : "") + " on startup", "If enabled, app will load the last " + Engine::mainEngine->fileExtension + " on startup", false);
+	openSpecificFileOnStartup = startupCC.addBoolParameter("Load specific " + (Engine::mainEngine != nullptr ? Engine::mainEngine->fileExtension : "") + " on startup", "If enabled, app will load the " + Engine::mainEngine->fileExtension + " specified below on startup", false, false);
+	fileToOpenOnStartup = new FileParameter("File to load on startup", "File to load when start, if the option above is checked", "", false);
+	fileToOpenOnStartup->forceAbsolutePath = true;
+	startupCC.addParameter(fileToOpenOnStartup);
+
+
+	addChildControllableContainer(&startupCC);
+
+	closeToSystemTray = interfaceCC.addBoolParameter("Close to system tray", "If checked, closing the main window will remove the window from desktop and put it on the system tray, but the app will still be running", false);
+	fontFamily = interfaceCC.addEnumParameter("Font family", "Typeface used by the interface. Changes are applied immediately; unavailable fonts fall back to the system default.");
+	fontFamily->addOption("System default", "");
+	StringArray fontNames = Font::findAllTypefaceNames();
+	fontNames.sortNatural();
+	for (const auto& fontName : fontNames) fontFamily->addOption(fontName, fontName, false);
+
+	fontSize = interfaceCC.addIntParameter("Font size", "Global font size, may be altered in some cases but this is used as a reference", 14, 0, 30);
+	bool reloadFontRendererByDefault = false;
+#if JUCE_WINDOWS
+	reloadFontRendererByDefault = true;
+#endif
+	reloadFontRendererOnStartup = interfaceCC.addBoolParameter("Reload font renderer on startup", "Clears the glyph caches once the complete interface has been created. Enable this if text is corrupted until Reload font renderer is clicked.", reloadFontRendererByDefault);
+	fontRendererReloadDelay = interfaceCC.addIntParameter("Font reload delay", "Delay in milliseconds before the startup font renderer reload. Increase this if some panels are still corrupted after startup.", 250, 0, 2000);
+	fontRendererReloadDelay->setEnabled(reloadFontRendererOnStartup->boolValue());
+	resetFontCache = interfaceCC.addTrigger("Reload font renderer", "Clears the software and OpenGL glyph caches, relayouts every component, and redraws the complete interface.");
+	enableTooltips = interfaceCC.addBoolParameter("Enable Tooltips", "If checked, this will show tooltips when mouse is over a parameter", true);
+	helpLanguage = interfaceCC.addEnumParameter("Help language", "What language to download ? You will need to restart the software to see changes");
+	helpLanguage->addOption("English", "en")->addOption("French", "fr")->addOption("Chinese", "cn");
+
+	bool useGL = true;
+#if JUCE_MAC || JUCE_LINUX //OpenGL is not working so well on mac and linux
+	useGL = false;
+#endif
+
+	useGLRenderer = interfaceCC.addBoolParameter("Use OpenGL Renderer", "Use hardware acceleration for the interface. Disable this to switch immediately to the software renderer if a GPU driver causes distorted text. The -forceNoGL launch argument is available if the interface is unreadable.", useGL);
+	
+	uiRefreshRate = interfaceCC.addIntParameter("UI Refresh Rate", "The refresh rate of the UI in hz", 30, 1, 100);
+	loggerRefreshRate = interfaceCC.addIntParameter("Logger Refresh Rate", "The refresh rate of the logger in hz", 20, 1, 1000);
+	alwaysOnTop = interfaceCC.addBoolParameter("Always on top", "If checked, the main window will be always on top the others windows", false);
+
+	addChildControllableContainer(&interfaceCC);
+
+	enableAutoSave = saveLoadCC.addBoolParameter("Enable auto-save", "When enabled, a backup file will be saved every 5 min", true);
+	autoSaveCurrentFile = saveLoadCC.addBoolParameter("Auto-save current file", "If checked, the current file will be saved as well when auto-saving", false);
+	autoSaveOnChangeOnly = saveLoadCC.addBoolParameter("Auto-save on change only", "If checked, the auto-save will only save when a change is detected", true);
+	autoAskRestore = saveLoadCC.addBoolParameter("Ask to restore on startup", "If checked, the app will ask to restore the auto-saved file on startup if a more recent auto-saved file has been found", true);
+	autoSaveCount = saveLoadCC.addIntParameter("Auto-save count", "The number of backup files to auto-save", 10, 1, 100);
+	autoSaveTime = saveLoadCC.addIntParameter("Auto-save time", "The time in minutes between two auto-saves (will)", 5, 1, 100);
+	compressOnSave = saveLoadCC.addBoolParameter("Compress file", "If checked, the JSON content will be minified, otherwise it will be human-readable but larger size as well", true);
+	logAutosave = saveLoadCC.addBoolParameter("Log auto-save", "If checked, the auto-save will be logged in the logger", true);
+
+	actionOnCrash = saveLoadCC.addEnumParameter("Action On Crash", "This determines what to do on a crash. Default shows the crash report window");
+	actionOnCrash->addOption("Report", REPORT)->addOption("Kill", KILL)->addOption("Reopen", REOPEN)->addOption("Recover", RECOVER);
+	autoSendCrashLog = saveLoadCC.addBoolParameter("Auto send crash log", "If checked and action on crash is not Report, the crash log will be automatically sent to the developer team", true);
+
+	crashContactEmail = saveLoadCC.addStringParameter("Crash Contact Mail", "A mail address to use if you wish to be contacted by the developer team", "");
+
+	testCrash = saveLoadCC.addTrigger("Test crash", "This will cause a crash, allowing for testing crashes. Don't push this unless you REALLY want to !!!");
+	saveLogsToFile = saveLoadCC.addBoolParameter("Save logs", "If checked, the content of the Logger will be automatically saved to a file", false);
+	addChildControllableContainer(&saveLoadCC);
+
+	askBeforeRemovingItems = editingCC.addBoolParameter("Ask before removing items", "If enabled, you will get a confirmation prompt before removing any item", false);
+
+	altScaleFactor = editingCC.addFloatParameter("Alt Scale factor", "Scale factor for editing sliders with alt", 0.5, 0, 1);
+
+	defaultEasing = editingCC.addEnumParameter("Default Easing", "Easing that is set by default when creating new automation keys");
+	for (int i = 0; i < Easing::TYPE_MAX; i++) defaultEasing->addOption(Easing::typeNames[i], (Easing::Type)i, false);
+	defaultEasing->defaultValue = Easing::typeNames[(int)Easing::BEZIER];
+	defaultEasing->resetValue();
+
+	addChildControllableContainer(&editingCC);
+	addChildControllableContainer(OSCRemoteControl::getInstance());
+	addChildControllableContainer(&keyMappingsCC);
+
+	launchArguments.includeInRecursiveSave = false;
+	addChildControllableContainer(&launchArguments);
+}
+
+GlobalSettings::~GlobalSettings()
+{
+}
+
+
+void GlobalSettings::onControllableFeedbackUpdate(ControllableContainer* cc, Controllable* c)
+{
+	ControllableContainer::onControllableFeedbackUpdate(cc, c);
+
+#if JUCE_WINDOWS	
+	if (c == launchOnStartup)
+	{
+
+		String regKey = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\" + OrganicApplication::getInstance()->getApplicationName();
+		String regValue = "\"" + File::getSpecialLocation(File::SpecialLocationType::currentApplicationFile).getFullPathName() + "\"";
+		if (launchOnStartup->boolValue()) WindowsRegistry::setValue(regKey, regValue);
+		else WindowsRegistry::deleteValue(regKey);
+	}
+#endif
+
+	if (c == openLastDocumentOnStartup)
+	{
+		if (openLastDocumentOnStartup->boolValue()) openSpecificFileOnStartup->setValue(false);
+		openSpecificFileOnStartup->setEnabled(!openLastDocumentOnStartup->boolValue());
+	}
+	else if (c == openLastDocumentOnStartup || c == openSpecificFileOnStartup)
+	{
+		fileToOpenOnStartup->setEnabled(openSpecificFileOnStartup->boolValue());
+	}
+	else if (c == enableAutoSave)
+	{
+		autoSaveCount->setEnabled(enableAutoSave->boolValue());
+	}
+	else if (c == helpLanguage)
+	{
+		HelpBox::getInstance()->loadHelp();
+	}
+	else if (c == fontFamily)
+	{
+		applyFontSettings();
+	}
+	else if (c == reloadFontRendererOnStartup)
+	{
+		fontRendererReloadDelay->setEnabled(reloadFontRendererOnStartup->boolValue());
+	}
+	else if (c == resetFontCache)
+	{
+		applyFontSettings(true);
+	}
+	else if (c == useGLRenderer && getApp().mainComponent != nullptr)
+	{
+		Component::SafePointer<OrganicMainContentComponent> safeMain(getApp().mainComponent.get());
+		auto updateRenderer = [safeMain]()
+			{
+				if (safeMain != nullptr) safeMain->setupOpenGL();
+			};
+
+		auto* mm = MessageManager::getInstanceWithoutCreating();
+		if (mm != nullptr && !mm->isThisTheMessageThread() && !mm->hasStopMessageBeenSent())
+			MessageManager::callAsync(updateRenderer);
+		else if (mm == nullptr || !mm->hasStopMessageBeenSent())
+			updateRenderer();
+	}
+	else if (c == testCrash)
+	{
+#if JUCE_DEBUG
+		CrashDumpUploader::getInstance()->handleCrash(0); //win only
+#else
+		Controllable* crashC = nullptr;
+		crashC->getJSONData(); //this will crash
+#endif
+	}
+	else if (c == saveLogsToFile)
+	{
+		CustomLogger::getInstance()->setFileLogging(saveLogsToFile->boolValue());
+	}
+	else if (c == uiRefreshRate)
+	{
+		OrganicUITimers::getInstance()->setupTimers();
+	}
+	else if (c == alwaysOnTop && getApp().mainWindow != nullptr)
+	{
+		getApp().mainWindow->setAlwaysOnTop(alwaysOnTop->boolValue());
+	}
+	else if (c == updateChannel && !cc->isCurrentlyLoadingData)
+	{
+		AppUpdater::getInstance()->run();
+	}
+
+
+	if (Engine::mainEngine != nullptr) Engine::mainEngine->setChangedFlag(false); //force no need to save when changing something in global settings
+}
+
+void GlobalSettings::applyFontSettings(bool clearCache)
+{
+	const String selectedFont = fontFamily != nullptr ? fontFamily->getValueData().toString() : String();
+	auto apply = [selectedFont, clearCache]()
+		{
+			if (clearCache) Typeface::clearTypefaceCache();
+			LookAndFeel::getDefaultLookAndFeel().setDefaultSansSerifTypefaceName(selectedFont);
+
+			for (int i = 0; i < TopLevelWindow::getNumTopLevelWindows(); ++i)
+			{
+				if (auto* window = TopLevelWindow::getTopLevelWindow(i))
+					window->sendLookAndFeelChange();
+			}
+
+			// Several OrganicUI controls only rebuild their text layout in resized().
+			// Run a component-local relayout on the following message-loop pass, after
+			// all look-and-feel notifications and asynchronous editor rebuilds settle.
+			if (auto* manager = MessageManager::getInstanceWithoutCreating();
+				manager != nullptr && !manager->hasStopMessageBeenSent())
+				Timer::callAfterDelay(50, []() { relayoutAndRepaintTopLevelWindows(); });
+			else
+				relayoutAndRepaintTopLevelWindows();
+		};
+
+	auto* mm = MessageManager::getInstanceWithoutCreating();
+	if (mm != nullptr && !mm->isThisTheMessageThread() && !mm->hasStopMessageBeenSent())
+		MessageManager::callAsync(apply);
+	else if (mm == nullptr || !mm->hasStopMessageBeenSent())
+		apply();
+}
+
+void GlobalSettings::scheduleFontRendererReload()
+{
+	if (reloadFontRendererOnStartup == nullptr || !reloadFontRendererOnStartup->boolValue()) return;
+
+	const int delayMs = fontRendererReloadDelay != nullptr ? fontRendererReloadDelay->intValue() : 250;
+	Timer::callAfterDelay(jmax(1, delayMs), []()
+		{
+			if (auto* settings = GlobalSettings::getInstanceWithoutCreating())
+				settings->applyFontSettings(true);
+		});
+}
+
+void GlobalSettings::loadJSONDataInternal(var data)
+{
+	openSpecificFileOnStartup->setEnabled(!openLastDocumentOnStartup->boolValue());
+	fileToOpenOnStartup->setEnabled(openSpecificFileOnStartup->boolValue());
+}
+
+void GlobalSettings::loadKeyMappingsFromData()
+{
+
+	KeyPressMappingSet* kms = getCommandManager().getKeyMappings();
+	std::unique_ptr<XmlElement> element = XmlDocument::parse(keyMappingsData.toString());
+	if (element != nullptr) kms->restoreFromXml(*element);
+}
+
+void GlobalSettings::addLaunchArguments(const String& commandLine, const CommandLineElements& elements)
+{
+	launchArguments.addStringParameter("Command Line", "Full commandline", commandLine);
+
+	for (auto& c : elements)
+	{
+		if (c.args.size() < 2) launchArguments.addStringParameter(c.command, "Argument for this command", c.args.isEmpty() ? "" : c.args[0]);
+		else
+		{
+			for (int i = 0; i < c.args.size(); i++)
+			{
+				launchArguments.addStringParameter(c.command + " " + String(i + 1), "Argument #" + String(i + 1) + " for this command", c.args[i]);
+			}
+		}
+
+	}
+
+	for (auto& c : launchArguments.controllables)
+	{
+		c->setControllableFeedbackOnly(true);
+	}
+}
+
+
+KeyMappingsContainer::KeyMappingsContainer() :
+	ControllableContainer("Key Mappings")
+{
+	editorIsCollapsed = true;
+}
+
+KeyMappingsContainer::~KeyMappingsContainer()
+{
+
+}
+
+var KeyMappingsContainer::getJSONData(bool includeNonOverriden)
+{
+	var data = ControllableContainer::getJSONData(includeNonOverriden);
+	KeyPressMappingSet* kms = getCommandManager().getKeyMappings();
+	std::unique_ptr<XmlElement> xmlElement(kms->createXml(true));
+	String xmlData = xmlElement->toString();
+	data.getDynamicObject()->setProperty("keyMappings", xmlData);
+	return data;
+}
+
+void KeyMappingsContainer::loadJSONDataInternal(var data)
+{
+	ControllableContainer::loadJSONDataInternal(data);
+	var keyMappingsData = data.getProperty("keyMappings", "");
+}
+
+InspectableEditor* KeyMappingsContainer::getEditorInternal(bool isRoot, Array<Inspectable*> inspectables)
+{
+	return new KeyMappingsContainerEditor(this, isRoot);
+}
